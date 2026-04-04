@@ -31,6 +31,14 @@ from financialcalc.tools.data_retrieval import (
     get_financial_data,
     get_raw_financial_statements,
 )
+from financialcalc.tools.report_generation import (
+    generate_analysis_report,
+    generate_scenario_report,
+)
+from financialcalc.tools.session_dcf import (
+    get_base_fcf_options,
+    run_dcf_analysis,
+)
 from financialcalc.utils.error_handling import FinancialCalcError
 
 logging.basicConfig(level=logging.INFO)
@@ -567,6 +575,118 @@ TOOLS: list[Tool] = [
             "required": ["financial_data", "assumptions"],
         },
     ),
+    # --- Session-Based Tools (Recommended) ---
+    Tool(
+        name="get_base_fcf_options",
+        description="Get all available base FCF calculation options with guidance. "
+        "RECOMMENDED: Use this before running DCF analysis to choose the best base FCF method. "
+        "Returns options: most_recent, average, median, sbc_adjusted, normalized.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session identifier (typically ticker symbol). "
+                    "Session is created automatically when get_financial_data is called.",
+                },
+            },
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="run_dcf_analysis",
+        description="Run DCF analysis using data from session. RECOMMENDED over run_complete_dcf_analysis. "
+        "Pulls all data automatically from session - agent only needs to provide assumptions. "
+        "Includes validation warnings and confidence scoring. "
+        "Session is created when get_financial_data is called.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session identifier (typically ticker symbol)",
+                },
+                "growth_rates": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Array of growth rates for each projection year (typically 10 years)",
+                },
+                "terminal_multiple": {
+                    "type": "number",
+                    "description": "Terminal value multiple (e.g., 15 for 15x)",
+                },
+                "discount_rate": {
+                    "type": "number",
+                    "default": 10.0,
+                    "description": "Discount rate as percentage (default: 10%)",
+                },
+                "margin_of_safety": {
+                    "type": "number",
+                    "default": 30.0,
+                    "description": "Margin of safety percentage (default: 30%)",
+                },
+                "base_fcf_method": {
+                    "type": "string",
+                    "enum": ["most_recent", "average", "median", "sbc_adjusted", "normalized"],
+                    "default": "most_recent",
+                    "description": "Method for calculating base FCF (default: most_recent)",
+                },
+                "net_cash_override": {
+                    "type": "number",
+                    "description": "Override net cash/debt position (optional)",
+                },
+                "shares_override": {
+                    "type": "number",
+                    "description": "Override shares outstanding (optional)",
+                },
+            },
+            "required": ["session_id", "growth_rates", "terminal_multiple"],
+        },
+    ),
+    Tool(
+        name="generate_analysis_report",
+        description="Generate a complete analysis report from session data. "
+        "Report includes executive summary with confidence score at the top for quick review. "
+        "Must call run_dcf_analysis first.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session identifier (typically ticker symbol)",
+                },
+                "qualitative_assessment": {
+                    "type": "object",
+                    "description": "Optional qualitative factors",
+                    "properties": {
+                        "business_quality": {
+                            "type": "string",
+                            "enum": ["poor", "average", "good", "excellent"],
+                        },
+                        "moat_strength": {
+                            "type": "string",
+                            "enum": ["none", "narrow", "wide"],
+                        },
+                        "management_quality": {
+                            "type": "string",
+                            "enum": ["poor", "average", "good", "excellent"],
+                        },
+                        "financial_health": {
+                            "type": "string",
+                            "enum": ["poor", "average", "good", "excellent"],
+                        },
+                        "notes": {"type": "string"},
+                    },
+                },
+                "include_sensitivity": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Whether to include sensitivity analysis (default: true)",
+                },
+            },
+            "required": ["session_id"],
+        },
+    ),
 ]
 
 
@@ -594,6 +714,10 @@ TOOL_FUNCTIONS = {
     "normalize_base_value": normalize_base_value,
     # Batch operations
     "run_complete_dcf_analysis": run_complete_dcf_analysis,
+    # Session-based tools (recommended)
+    "get_base_fcf_options": get_base_fcf_options,
+    "run_dcf_analysis": run_dcf_analysis,
+    "generate_analysis_report": generate_analysis_report,
 }
 
 

@@ -9,6 +9,7 @@ import yfinance as yf
 from financialcalc.utils.cache_manager import CACHE_TTL_SECONDS, SQLiteCache
 from financialcalc.utils.config import settings
 from financialcalc.utils.error_handling import DataRetrievalError, ValidationError
+from financialcalc.utils.session_manager import session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,12 @@ def get_financial_data(
         if cached:
             logger.info(f"Cache hit for {symbol} historical data ({years} years)")
             cached["cached"] = True
+            # Store in session for subsequent tool calls (even when cached)
+            session_manager.update_session(symbol, {
+                "financial_data": cached,
+                "symbol": symbol,
+            })
+            logger.info(f"Stored financial data in session for {symbol} (from cache)")
             return cached
 
     try:
@@ -277,6 +284,13 @@ def get_financial_data(
 
         cache.set(symbol, cache_key, data, CACHE_TTL_SECONDS["historical_fcf"])
 
+        # Store in session for subsequent tool calls
+        session_manager.update_session(symbol, {
+            "financial_data": data,
+            "symbol": symbol,
+        })
+        logger.info(f"Stored financial data in session for {symbol}")
+
         return data
 
     except Exception as e:
@@ -321,6 +335,9 @@ def get_balance_sheet(
         if cached:
             logger.info(f"Cache hit for {symbol} balance sheet ({years} years)")
             cached["cached"] = True
+            # Store in session for subsequent tool calls (even when cached)
+            session_manager.update_session(symbol, {"balance_sheet": cached})
+            logger.info(f"Stored balance sheet in session for {symbol} (from cache)")
             return cached
 
     try:
@@ -480,6 +497,10 @@ def get_balance_sheet(
 
         cache.set(symbol, cache_key, data, CACHE_TTL_SECONDS["historical_fcf"])
 
+        # Store in session for subsequent tool calls
+        session_manager.update_session(symbol, {"balance_sheet": data})
+        logger.info(f"Stored balance sheet in session for {symbol}")
+
         return data
 
     except Exception as e:
@@ -605,7 +626,7 @@ def get_current_metrics(
         cached_shares = cache.get(symbol, "shares_outstanding")
 
         if cached_price and cached_mc and cached_shares:
-            return {
+            result = {
                 "symbol": symbol,
                 "current_price": cached_price["price"],
                 "market_cap": cached_mc["market_cap"],
@@ -613,6 +634,10 @@ def get_current_metrics(
                 "previous_close": cached_price.get("previous_close"),
                 "cached": True,
             }
+            # Store in session for subsequent tool calls (even when cached)
+            session_manager.update_session(symbol, {"current_metrics": result})
+            logger.info(f"Stored current metrics in session for {symbol} (from cache)")
+            return result
 
     try:
         ticker = _get_yf_ticker(symbol)
@@ -660,7 +685,7 @@ def get_current_metrics(
             CACHE_TTL_SECONDS["shares_outstanding"],
         )
 
-        return {
+        result = {
             "symbol": symbol,
             "current_price": round(current_price, 2),
             "market_cap": int(market_cap),
@@ -668,6 +693,12 @@ def get_current_metrics(
             "previous_close": (round(previous_close, 2) if previous_close else None),
             "cached": False,
         }
+
+        # Store in session for subsequent tool calls
+        session_manager.update_session(symbol, {"current_metrics": result})
+        logger.info(f"Stored current metrics in session for {symbol}")
+
+        return result
 
     except DataRetrievalError:
         raise
