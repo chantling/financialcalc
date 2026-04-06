@@ -121,6 +121,7 @@ def get_financial_data(
     years: int = 5,
     force_refresh: bool = False,
     clear_cache: bool = False,
+    include_company_info: bool = True,
 ) -> Dict:
     """Retrieve historical financial data from Yahoo Finance.
 
@@ -129,11 +130,13 @@ def get_financial_data(
         years: Number of years of data (1-10)
         force_refresh: Force fetch from Yahoo Finance, bypassing cache
         clear_cache: Clear cache for this symbol before fetching
+        include_company_info: Include company name, industry, and sector metadata
 
     Returns:
         Dictionary with revenue, net_income, free_cash_flow, operating_cash_flow,
         capital_expenditures, stock_based_compensation, sbc_adjusted_fcf,
-        shares_outstanding, basic_eps, dates, available_years
+        shares_outstanding, basic_eps, dates, available_years, and optionally
+        company_info (long_name, short_name, industry, sector, business_summary)
     """
     if not symbol or not isinstance(symbol, str):
         raise ValidationError("Symbol must be a non-empty string")
@@ -142,7 +145,7 @@ def get_financial_data(
         raise ValidationError("Years must be between 1 and 10")
 
     cache = _get_cache()
-    cache_key = f"historical_data_v3_{years}"
+    cache_key = f"historical_data_v4_{years}_{include_company_info}"
 
     if clear_cache:
         cache.invalidate(symbol, cache_key)
@@ -166,6 +169,17 @@ def get_financial_data(
 
         income_stmt = ticker.income_stmt
         cash_flow = ticker.cash_flow
+
+        company_info = {}
+        if include_company_info:
+            info = ticker.info
+            company_info = {
+                "long_name": info.get("longName"),
+                "short_name": info.get("shortName"),
+                "industry": info.get("industry"),
+                "sector": info.get("sector"),
+                "business_summary": info.get("longBusinessSummary"),
+            }
 
         # Extract all available fields with graceful fallback
         revenue = _extract_series(income_stmt, "Total Revenue", years)
@@ -282,6 +296,9 @@ def get_financial_data(
             "cached": False,
         }
 
+        if include_company_info:
+            data["company_info"] = company_info
+
         cache.set(symbol, cache_key, data, CACHE_TTL_SECONDS["historical_fcf"])
 
         # Store in session for subsequent tool calls
@@ -303,6 +320,7 @@ def get_balance_sheet(
     years: int = 5,
     force_refresh: bool = False,
     clear_cache: bool = False,
+    include_company_info: bool = False,
 ) -> Dict:
     """Retrieve balance sheet data from Yahoo Finance.
 
@@ -311,12 +329,13 @@ def get_balance_sheet(
         years: Number of years of data (1-10)
         force_refresh: Force fetch from Yahoo Finance
         clear_cache: Clear cache before fetching
+        include_company_info: Include company name, industry, and sector metadata
 
     Returns:
         Dictionary with total_assets, total_liabilities, total_equity,
         total_debt, total_cash, net_debt, short_term_debt, long_term_debt,
         cash_and_equivalents, short_term_investments, goodwill,
-        intangible_assets, dates, available_years
+        intangible_assets, dates, available_years, and optionally company_info
     """
     if not symbol or not isinstance(symbol, str):
         raise ValidationError("Symbol must be a non-empty string")
@@ -325,7 +344,7 @@ def get_balance_sheet(
         raise ValidationError("Years must be between 1 and 10")
 
     cache = _get_cache()
-    cache_key = f"balance_sheet_v2_{years}"
+    cache_key = f"balance_sheet_v3_{years}_{include_company_info}"
 
     if clear_cache:
         cache.invalidate(symbol, cache_key)
@@ -345,6 +364,17 @@ def get_balance_sheet(
         ticker = _get_yf_ticker(symbol)
 
         balance_sheet = ticker.balance_sheet
+
+        company_info = {}
+        if include_company_info:
+            info = ticker.info
+            company_info = {
+                "long_name": info.get("longName"),
+                "short_name": info.get("shortName"),
+                "industry": info.get("industry"),
+                "sector": info.get("sector"),
+                "business_summary": info.get("longBusinessSummary"),
+            }
 
         # Extract fields with multiple possible names
         total_assets = _extract_series(balance_sheet, "Total Assets", years)
@@ -495,6 +525,9 @@ def get_balance_sheet(
             "cached": False,
         }
 
+        if include_company_info:
+            data["company_info"] = company_info
+
         cache.set(symbol, cache_key, data, CACHE_TTL_SECONDS["historical_fcf"])
 
         # Store in session for subsequent tool calls
@@ -516,6 +549,7 @@ def get_raw_financial_statements(
     years: int = 5,
     force_refresh: bool = False,
     clear_cache: bool = False,
+    include_company_info: bool = False,
 ) -> Dict:
     """Retrieve raw financial statement data from Yahoo Finance.
 
@@ -525,9 +559,11 @@ def get_raw_financial_statements(
         years: Number of years of data (1-10)
         force_refresh: Force fetch from Yahoo Finance
         clear_cache: Clear cache before fetching
+        include_company_info: Include company name, industry, and sector metadata
 
     Returns:
-        Dictionary with statement_type, dates, and all line items as key-value pairs
+        Dictionary with statement_type, dates, and all line items as key-value pairs,
+        and optionally company_info
     """
     if not symbol or not isinstance(symbol, str):
         raise ValidationError("Symbol must be a non-empty string")
@@ -541,7 +577,7 @@ def get_raw_financial_statements(
         raise ValidationError("Years must be between 1 and 10")
 
     cache = _get_cache()
-    cache_key = f"raw_{statement_type}_v2_{years}"
+    cache_key = f"raw_{statement_type}_v3_{years}_{include_company_info}"
 
     if clear_cache:
         cache.invalidate(symbol, cache_key)
@@ -556,6 +592,17 @@ def get_raw_financial_statements(
     try:
         logger.info(f"Fetching {symbol} raw {statement_type} from Yahoo Finance")
         ticker = _get_yf_ticker(symbol)
+
+        company_info = {}
+        if include_company_info:
+            info = ticker.info
+            company_info = {
+                "long_name": info.get("longName"),
+                "short_name": info.get("shortName"),
+                "industry": info.get("industry"),
+                "sector": info.get("sector"),
+                "business_summary": info.get("longBusinessSummary"),
+            }
 
         if statement_type == "income":
             statement = ticker.income_stmt
@@ -585,6 +632,9 @@ def get_raw_financial_statements(
             "cached": False,
         }
 
+        if include_company_info:
+            data["company_info"] = company_info
+
         cache.set(symbol, cache_key, data, CACHE_TTL_SECONDS["historical_fcf"])
 
         return data
@@ -597,7 +647,10 @@ def get_raw_financial_statements(
 
 
 def get_current_metrics(
-    symbol: str, force_refresh: bool = False, clear_cache: bool = False
+    symbol: str,
+    force_refresh: bool = False,
+    clear_cache: bool = False,
+    include_company_info: bool = True,
 ) -> Dict:
     """Retrieve current market data.
 
@@ -605,10 +658,12 @@ def get_current_metrics(
         symbol: Stock ticker symbol
         force_refresh: Force fetch from Yahoo Finance
         clear_cache: Clear cache for this symbol
+        include_company_info: Include company name, industry, and sector metadata
 
     Returns:
         Dictionary with current_price, market_cap, shares_outstanding,
-        previous_close
+        previous_close, and optionally company_info (long_name, short_name,
+        industry, sector, business_summary)
     """
     if not symbol or not isinstance(symbol, str):
         raise ValidationError("Symbol must be a non-empty string")
@@ -624,6 +679,7 @@ def get_current_metrics(
         cached_price = cache.get(symbol, "current_price")
         cached_mc = cache.get(symbol, "market_cap")
         cached_shares = cache.get(symbol, "shares_outstanding")
+        cached_company = cache.get(symbol, "company_info") if include_company_info else None
 
         if cached_price and cached_mc and cached_shares:
             result = {
@@ -634,6 +690,8 @@ def get_current_metrics(
                 "previous_close": cached_price.get("previous_close"),
                 "cached": True,
             }
+            if include_company_info and cached_company:
+                result["company_info"] = cached_company
             # Store in session for subsequent tool calls (even when cached)
             session_manager.update_session(symbol, {"current_metrics": result})
             logger.info(f"Stored current metrics in session for {symbol} (from cache)")
@@ -642,6 +700,16 @@ def get_current_metrics(
     try:
         ticker = _get_yf_ticker(symbol)
         info = ticker.info
+
+        company_info = {}
+        if include_company_info:
+            company_info = {
+                "long_name": info.get("longName"),
+                "short_name": info.get("shortName"),
+                "industry": info.get("industry"),
+                "sector": info.get("sector"),
+                "business_summary": info.get("longBusinessSummary"),
+            }
 
         # Try multiple price fields for robustness
         current_price = info.get("currentPrice")
@@ -685,6 +753,14 @@ def get_current_metrics(
             CACHE_TTL_SECONDS["shares_outstanding"],
         )
 
+        if include_company_info:
+            cache.set(
+                symbol,
+                "company_info",
+                company_info,
+                CACHE_TTL_SECONDS["current_price"],
+            )
+
         result = {
             "symbol": symbol,
             "current_price": round(current_price, 2),
@@ -693,6 +769,9 @@ def get_current_metrics(
             "previous_close": (round(previous_close, 2) if previous_close else None),
             "cached": False,
         }
+
+        if include_company_info:
+            result["company_info"] = company_info
 
         # Store in session for subsequent tool calls
         session_manager.update_session(symbol, {"current_metrics": result})
