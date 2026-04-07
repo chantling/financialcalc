@@ -51,10 +51,11 @@ TOOLS: list[Tool] = [
     Tool(
         name="get_financial_data",
         description="Retrieve historical financial data from Yahoo Finance (cached). "
+        "All monetary values are automatically converted to USD. "
         "Returns revenue, net_income, free_cash_flow, operating_cash_flow, "
         "capital_expenditures, stock_based_compensation, sbc_adjusted_fcf, "
-        "shares_outstanding, basic_eps, and company_info (long_name, short_name, "
-        "industry, sector, business_summary).",
+        "shares_outstanding, basic_eps, original_currency, exchange_rate_used, "
+        "and company_info (long_name, short_name, industry, sector, business_summary).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -88,7 +89,7 @@ TOOLS: list[Tool] = [
     Tool(
         name="get_current_metrics",
         description="Retrieve current market data (cached): price, market cap, shares, previous_close, "
-        "and company_info (long_name, short_name, industry, sector, business_summary).",
+        "trading_currency, and company_info (long_name, short_name, industry, sector, business_summary).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -115,10 +116,12 @@ TOOLS: list[Tool] = [
     Tool(
         name="get_balance_sheet",
         description="Retrieve balance sheet data from Yahoo Finance (cached). "
+        "All monetary values are automatically converted to USD. "
         "Returns total_assets, total_liabilities, total_equity, total_debt, "
         "total_cash, short_term_debt, long_term_debt, cash_and_equivalents, "
-        "short_term_investments, goodwill, intangible_assets, and optionally "
-        "company_info (long_name, short_name, industry, sector, business_summary).",
+        "short_term_investments, goodwill, intangible_assets, original_currency, "
+        "exchange_rate_used, and optionally company_info (long_name, short_name, "
+        "industry, sector, business_summary).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -152,8 +155,10 @@ TOOLS: list[Tool] = [
     Tool(
         name="get_raw_financial_statements",
         description="Retrieve raw financial statement data from Yahoo Finance. "
+        "All monetary values are automatically converted to USD. "
         "Returns all line items as key-value pairs for verification and custom calculations, "
-        "and optionally company_info (long_name, short_name, industry, sector, business_summary). "
+        "original_currency, exchange_rate_used, and optionally company_info "
+        "(long_name, short_name, industry, sector, business_summary). "
         "statement_type: 'income', 'cashflow', or 'balance'.",
         inputSchema={
             "type": "object",

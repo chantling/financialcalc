@@ -91,6 +91,48 @@ def _get_yf_ticker(symbol: str) -> yf.Ticker:
     return yf.Ticker(normalized)
 
 
+def _get_exchange_rate_to_usd(financial_currency: Optional[str]) -> Optional[float]:
+    """Get exchange rate from financial currency to USD using yfinance.
+
+    Returns 1.0 if already USD, or the conversion rate otherwise.
+    Returns None if the rate cannot be fetched.
+
+    Uses yfinance ticker format: CNYUSD=X, BRLUSD=X, etc.
+    """
+    if not financial_currency or financial_currency == "USD":
+        return 1.0
+
+    try:
+        fx_symbol = f"{financial_currency}USD=X"
+        fx_ticker = yf.Ticker(fx_symbol)
+        rate = fx_ticker.info.get("regularMarketPrice")
+        if rate is not None:
+            logger.info(f"Exchange rate {fx_symbol}: {rate}")
+            return float(rate)
+
+        # Fallback: try without =X suffix
+        fx_ticker2 = yf.Ticker(f"{financial_currency}USD")
+        rate2 = fx_ticker2.info.get("regularMarketPrice")
+        if rate2 is not None:
+            logger.info(f"Exchange rate {financial_currency}USD: {rate2}")
+            return float(rate2)
+
+        logger.warning(
+            f"Could not fetch exchange rate for {financial_currency} to USD"
+        )
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to fetch exchange rate for {financial_currency}: {e}")
+        return None
+
+
+def _convert_array_to_usd(
+    values: List[Optional[float]], rate: float
+) -> List[Optional[float]]:
+    """Convert a list of monetary values to USD using the given exchange rate."""
+    return [round(v * rate, 2) if v is not None else None for v in values]
+
+
 def _get_shares_from_info(ticker: yf.Ticker) -> Optional[int]:
     """Try multiple methods to get shares outstanding from ticker info."""
     info = ticker.info
@@ -145,7 +187,7 @@ def get_financial_data(
         raise ValidationError("Years must be between 1 and 10")
 
     cache = _get_cache()
-    cache_key = f"historical_data_v4_{years}_{include_company_info}"
+    cache_key = f"historical_data_v5_usd_{years}_{include_company_info}"
 
     if clear_cache:
         cache.invalidate(symbol, cache_key)
@@ -180,6 +222,15 @@ def get_financial_data(
                 "sector": info.get("sector"),
                 "business_summary": info.get("longBusinessSummary"),
             }
+
+        # Get exchange rate for currency conversion to USD
+        financial_currency = ticker.info.get("financialCurrency")
+        exchange_rate = _get_exchange_rate_to_usd(financial_currency)
+        if exchange_rate is None:
+            logger.warning(
+                f"Could not fetch exchange rate for {symbol} ({financial_currency}). "
+                "Returning unconverted financial data."
+            )
 
         # Extract all available fields with graceful fallback
         revenue = _extract_series(income_stmt, "Total Revenue", years)
@@ -268,12 +319,39 @@ def get_financial_data(
         # Determine available years (count non-None FCF entries)
         available_years = sum(1 for v in fcf if v is not None)
 
+        # Convert monetary values to USD if exchange rate is available
+        if exchange_rate is not None and exchange_rate != 1.0:
+            revenue = _convert_array_to_usd(revenue, exchange_rate)
+            net_income = _convert_array_to_usd(net_income, exchange_rate)
+            fcf = _convert_array_to_usd(fcf, exchange_rate)
+            ocf = _convert_array_to_usd(ocf, exchange_rate)
+            capex = _convert_array_to_usd(capex, exchange_rate)
+            sbc = _convert_array_to_usd(sbc, exchange_rate)
+            # Recalculate SBC-adjusted FCF with converted values
+            sbc_adjusted_fcf = []
+            for i in range(max_len):
+                f = fcf[i]
+                s = sbc[i]
+                if f is not None and s is not None:
+                    sbc_adjusted_fcf.append(round(f - s, 2))
+                elif f is not None:
+                    sbc_adjusted_fcf.append(f)
+                else:
+                    sbc_adjusted_fcf.append(None)
+            eps = _convert_array_to_usd(eps, exchange_rate)
+            logger.info(
+                f"Converted {symbol} financials from {financial_currency} to USD "
+                f"(rate: {exchange_rate})"
+            )
+
         data = {
             "symbol": symbol,
             "years": years,
             "available_years": available_years,
             "actual_years_available": max_len,
             "dates": dates,
+            "original_currency": financial_currency,
+            "exchange_rate_used": round(exchange_rate, 6) if exchange_rate is not None else None,
             "revenue": [round(float(r), 2) if r is not None else None for r in revenue],
             "net_income": [
                 round(float(n), 2) if n is not None else None for n in net_income
@@ -344,7 +422,7 @@ def get_balance_sheet(
         raise ValidationError("Years must be between 1 and 10")
 
     cache = _get_cache()
-    cache_key = f"balance_sheet_v3_{years}_{include_company_info}"
+    cache_key = f"balance_sheet_v4_usd_{years}_{include_company_info}"
 
     if clear_cache:
         cache.invalidate(symbol, cache_key)
@@ -375,6 +453,15 @@ def get_balance_sheet(
                 "sector": info.get("sector"),
                 "business_summary": info.get("longBusinessSummary"),
             }
+
+        # Get exchange rate for currency conversion to USD
+        financial_currency = ticker.info.get("financialCurrency")
+        exchange_rate = _get_exchange_rate_to_usd(financial_currency)
+        if exchange_rate is None:
+            logger.warning(
+                f"Could not fetch exchange rate for {symbol} ({financial_currency}). "
+                "Returning unconverted balance sheet data."
+            )
 
         # Extract fields with multiple possible names
         total_assets = _extract_series(balance_sheet, "Total Assets", years)
@@ -478,12 +565,33 @@ def get_balance_sheet(
         # Determine available years
         available_years = sum(1 for v in (total_assets or []) if v is not None)
 
+        # Convert monetary values to USD if exchange rate is available
+        if exchange_rate is not None and exchange_rate != 1.0:
+            total_assets = _convert_array_to_usd(total_assets, exchange_rate)
+            total_liabilities = _convert_array_to_usd(total_liabilities, exchange_rate)
+            total_equity = _convert_array_to_usd(total_equity, exchange_rate)
+            total_debt = _convert_array_to_usd(total_debt, exchange_rate)
+            net_debt = _convert_array_to_usd(net_debt, exchange_rate)
+            total_cash = _convert_array_to_usd(total_cash, exchange_rate)
+            short_term_debt = _convert_array_to_usd(short_term_debt, exchange_rate)
+            long_term_debt = _convert_array_to_usd(long_term_debt, exchange_rate)
+            cash_and_equivalents = _convert_array_to_usd(cash_and_equivalents, exchange_rate)
+            short_term_investments = _convert_array_to_usd(short_term_investments, exchange_rate)
+            goodwill = _convert_array_to_usd(goodwill, exchange_rate)
+            intangible_assets = _convert_array_to_usd(intangible_assets, exchange_rate)
+            logger.info(
+                f"Converted {symbol} balance sheet from {financial_currency} to USD "
+                f"(rate: {exchange_rate})"
+            )
+
         data = {
             "symbol": symbol,
             "years": years,
             "available_years": available_years,
             "actual_years_available": len(dates),
             "dates": dates,
+            "original_currency": financial_currency,
+            "exchange_rate_used": round(exchange_rate, 6) if exchange_rate is not None else None,
             "total_assets": [
                 round(float(v), 2) if v is not None else None for v in total_assets
             ],
@@ -577,7 +685,7 @@ def get_raw_financial_statements(
         raise ValidationError("Years must be between 1 and 10")
 
     cache = _get_cache()
-    cache_key = f"raw_{statement_type}_v3_{years}_{include_company_info}"
+    cache_key = f"raw_{statement_type}_v4_usd_{years}_{include_company_info}"
 
     if clear_cache:
         cache.invalidate(symbol, cache_key)
@@ -604,6 +712,15 @@ def get_raw_financial_statements(
                 "business_summary": info.get("longBusinessSummary"),
             }
 
+        # Get exchange rate for currency conversion to USD
+        financial_currency = ticker.info.get("financialCurrency")
+        exchange_rate = _get_exchange_rate_to_usd(financial_currency)
+        if exchange_rate is None:
+            logger.warning(
+                f"Could not fetch exchange rate for {symbol} ({financial_currency}). "
+                "Returning unconverted raw statement data."
+            )
+
         if statement_type == "income":
             statement = ticker.income_stmt
         elif statement_type == "cashflow":
@@ -618,6 +735,8 @@ def get_raw_financial_statements(
         line_items: Dict[str, List[Optional[float]]] = {}
         for row_label in statement.index:
             values = _extract_series(statement, row_label, years)
+            if exchange_rate is not None and exchange_rate != 1.0:
+                values = _convert_array_to_usd(values, exchange_rate)
             line_items[str(row_label)] = [
                 round(float(v), 2) if v is not None else None for v in values
             ]
@@ -628,6 +747,8 @@ def get_raw_financial_statements(
             "years": years,
             "actual_years_available": len(dates),
             "dates": dates,
+            "original_currency": financial_currency,
+            "exchange_rate_used": round(exchange_rate, 6) if exchange_rate is not None else None,
             "line_items": line_items,
             "cached": False,
         }
@@ -688,6 +809,7 @@ def get_current_metrics(
                 "market_cap": cached_mc["market_cap"],
                 "shares_outstanding": cached_shares["shares"],
                 "previous_close": cached_price.get("previous_close"),
+                "trading_currency": cached_price.get("trading_currency", "USD"),
                 "cached": True,
             }
             if include_company_info and cached_company:
@@ -734,6 +856,7 @@ def get_current_metrics(
         price_data = {
             "price": current_price,
             "previous_close": previous_close,
+            "trading_currency": info.get("currency", "USD"),
         }
         cache.set(
             symbol,
@@ -767,6 +890,7 @@ def get_current_metrics(
             "market_cap": int(market_cap),
             "shares_outstanding": int(shares_outstanding),
             "previous_close": (round(previous_close, 2) if previous_close else None),
+            "trading_currency": info.get("currency", "USD"),
             "cached": False,
         }
 

@@ -178,7 +178,7 @@ def _dcf_sensitivity_analysis(
             logger.warning(
                 f"DCF sensitivity scenario failed for {dict(zip(variables, combo))}: {e}"
             )
-            adjusted_value = 0
+            continue  # Skip invalid scenarios instead of returning 0
 
         sensitivity_matrix.append(
             {
