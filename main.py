@@ -8,37 +8,27 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from financialcalc.tools.analysis_support import (
-    calculate_margin_of_safety,
-    calculate_probability_weighted,
-    calculate_sensitivity_analysis,
-    calculate_sotp_valuation,
-    normalize_base_value,
-)
+    calculate_margin_of_safety, calculate_probability_weighted,
+    calculate_sensitivity_analysis, calculate_sotp_valuation,
+    normalize_base_value)
 from financialcalc.tools.batch_operations import run_complete_dcf_analysis
-from financialcalc.tools.core_calculations import (
-    calculate_cagr,
-    calculate_custom_fcf,
-    calculate_graham_formula,
-    calculate_intrinsic_value,
-    calculate_net_debt,
-    calculate_present_value,
-    calculate_terminal_value,
-    project_cash_flows,
-)
-from financialcalc.tools.data_retrieval import (
-    get_balance_sheet,
-    get_current_metrics,
-    get_financial_data,
-    get_raw_financial_statements,
-)
-from financialcalc.tools.report_generation import (
-    generate_analysis_report,
-    generate_scenario_report,
-)
-from financialcalc.tools.session_dcf import (
-    get_base_fcf_options,
-    run_dcf_analysis,
-)
+from financialcalc.tools.core_calculations import (calculate_cagr,
+                                                   calculate_custom_fcf,
+                                                   calculate_graham_formula,
+                                                   calculate_intrinsic_value,
+                                                   calculate_net_debt,
+                                                   calculate_present_value,
+                                                   calculate_terminal_value,
+                                                   project_cash_flows)
+from financialcalc.tools.data_retrieval import (get_balance_sheet,
+                                                get_current_metrics,
+                                                get_financial_data,
+                                                get_raw_financial_statements)
+from financialcalc.tools.eight_pillar import run_eight_pillar_analysis
+from financialcalc.tools.report_generation import (generate_analysis_report,
+                                                   generate_scenario_report)
+from financialcalc.tools.session_dcf import (get_base_fcf_options,
+                                             run_dcf_analysis)
 from financialcalc.utils.error_handling import FinancialCalcError
 
 logging.basicConfig(level=logging.INFO)
@@ -656,7 +646,13 @@ TOOLS: list[Tool] = [
                 },
                 "base_fcf_method": {
                     "type": "string",
-                    "enum": ["most_recent", "average", "median", "sbc_adjusted", "normalized"],
+                    "enum": [
+                        "most_recent",
+                        "average",
+                        "median",
+                        "sbc_adjusted",
+                        "normalized",
+                    ],
                     "default": "most_recent",
                     "description": "Method for calculating base FCF (default: most_recent)",
                 },
@@ -716,6 +712,43 @@ TOOLS: list[Tool] = [
             "required": ["session_id"],
         },
     ),
+    Tool(
+        name="run_eight_pillar_analysis",
+        description="Run complete 8-pillar fundamental stock analysis. "
+        "Fetches all data internally from Yahoo Finance (reusing cached session data). "
+        "Evaluates: PE Ratio, ROIC, Revenue Growth, Net Income Growth, "
+        "Shares Trend, Long-Term Liabilities, FCF Growth, and FCF Multiple. "
+        "Returns pass/fail for each pillar with an overall score. "
+        "Thresholds are configurable via .env. "
+        "Call get_financial_data first to populate session cache.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock ticker symbol (e.g., AAPL)",
+                },
+                "years": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 5,
+                    "description": "Number of years of historical data",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force fresh data fetch from Yahoo Finance",
+                },
+                "clear_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Clear cache before fetching",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
 ]
 
 
@@ -747,6 +780,8 @@ TOOL_FUNCTIONS = {
     "get_base_fcf_options": get_base_fcf_options,
     "run_dcf_analysis": run_dcf_analysis,
     "generate_analysis_report": generate_analysis_report,
+    # 8-Pillar analysis
+    "run_eight_pillar_analysis": run_eight_pillar_analysis,
 }
 
 
