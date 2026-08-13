@@ -134,11 +134,16 @@ def _convert_array_to_usd(
 
 
 def _get_shares_from_info(ticker: yf.Ticker) -> Optional[int]:
-    """Try multiple methods to get shares outstanding from ticker info."""
+    """Try multiple methods to get shares outstanding from ticker info.
+
+    Prefers impliedSharesOutstanding (derived from market_cap / price, captures
+    all share classes for multi-class companies like GOOG) over sharesOutstanding
+    (which may report only a single class).
+    """
     info = ticker.info
-    shares = _safe_int(info.get("sharesOutstanding"))
+    shares = _safe_int(info.get("impliedSharesOutstanding"))
     if shares is None:
-        shares = _safe_int(info.get("impliedSharesOutstanding"))
+        shares = _safe_int(info.get("sharesOutstanding"))
     return shares
 
 
@@ -849,9 +854,9 @@ def get_current_metrics(
             previous_close = info.get("regularMarketPreviousClose")
 
         market_cap = info.get("marketCap", 0)
-        shares_outstanding = info.get("sharesOutstanding", 0)
+        shares_outstanding = info.get("impliedSharesOutstanding", 0)
         if shares_outstanding == 0:
-            shares_outstanding = info.get("impliedSharesOutstanding", 0)
+            shares_outstanding = info.get("sharesOutstanding", 0)
 
         price_data = {
             "price": current_price,

@@ -1,5 +1,5 @@
 # Python
-__pycache__
+__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -33,7 +33,11 @@ ENV/
 *.swo
 *~
 
+# AI Tools
+.claude
+
 # Testing
+tests/
 .pytest_cache/
 .coverage
 htmlcov/
@@ -42,7 +46,6 @@ htmlcov/
 coverage.xml
 *.cover
 .hypothesis/
-tests/
 
 # Type Checking
 .mypy_cache/
@@ -50,9 +53,7 @@ tests/
 dmypy.json
 
 # Cache
-cache/*.db
-cache/*.db-shm
-cache/*.db-wal
+cache/
 
 # Environment
 .env
@@ -70,5 +71,11 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
-.ClineData
-.claude
+# Project Output
+Analysis/
+
+# Project Docs (local-only)
+AGENTS.md
+AGENTS_SYMDEX.md
+analyze_stock_DCF.md
+COMPANY_INFO_IMPLEMENTATION.md

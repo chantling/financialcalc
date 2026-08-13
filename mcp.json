@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "financialcalc": {
+      "command": ".venv\\Scripts\\python.exe",
+      "args": ["-m", "financialcalc.main"]
+    }
+  }
+}
