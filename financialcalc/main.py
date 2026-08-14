@@ -295,7 +295,8 @@ TOOLS: list[Tool] = [
                 "shares_outstanding": {
                     "type": "number",
                     "minimum": 1,
-                    "description": "Number of shares outstanding",
+                    "description": "Diluted shares outstanding (includes options/RSUs; "
+                    "preferred for DCF per-share value)",
                 },
             },
             "required": [
@@ -453,7 +454,10 @@ TOOLS: list[Tool] = [
                         },
                         "discount_rate": {"type": "number"},
                         "terminal_multiple": {"type": "number"},
-                        "shares_outstanding": {"type": "number"},
+                        "shares_outstanding": {
+                            "type": "number",
+                            "description": "Diluted shares outstanding",
+                        },
                         "net_cash": {"type": "number"},
                     },
                 },
@@ -579,7 +583,8 @@ TOOLS: list[Tool] = [
                         },
                         "shares_outstanding": {
                             "type": "number",
-                            "description": "Override shares from financial_data",
+                            "description": "Override shares from financial_data "
+                            "(use diluted count; defaults to diluted_shares_outstanding)",
                         },
                     },
                     "required": [
@@ -662,7 +667,8 @@ TOOLS: list[Tool] = [
                 },
                 "shares_override": {
                     "type": "number",
-                    "description": "Override shares outstanding (optional)",
+                    "description": "Override shares outstanding (optional; use diluted "
+                    "count. Defaults to diluted_shares_outstanding from session)",
                 },
             },
             "required": ["session_id", "growth_rates", "terminal_multiple"],

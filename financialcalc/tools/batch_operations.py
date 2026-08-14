@@ -30,7 +30,9 @@ def run_complete_dcf_analysis(financial_data: dict, assumptions: dict) -> dict:
             - terminal_multiple (float, required): Terminal value multiple
             - margin_of_safety (float, required): Margin of safety percentage
             - net_cash (float, optional): Net cash/debt position (default: 0)
-            - shares_outstanding (float, optional): Override shares from financial_data
+            - shares_outstanding (float, optional): Override shares from
+              financial_data. When not provided, diluted_shares_outstanding
+              is preferred over basic shares_outstanding per methodology.
 
     Returns:
         Complete analysis results including projected_flows, pv, tv, iv,
@@ -55,9 +57,12 @@ def run_complete_dcf_analysis(financial_data: dict, assumptions: dict) -> dict:
     net_cash = assumptions.get("net_cash", 0)
 
     # Get shares outstanding from assumptions or financial_data
-    shares_outstanding = assumptions.get(
-        "shares_outstanding", financial_data.get("shares_outstanding")
-    )
+    # Prefer diluted (per IV_Distilled.md methodology); fall back to basic.
+    shares_outstanding = assumptions.get("shares_outstanding")
+    if not shares_outstanding or shares_outstanding <= 0:
+        shares_outstanding = financial_data.get("diluted_shares_outstanding")
+    if not shares_outstanding or shares_outstanding <= 0:
+        shares_outstanding = financial_data.get("shares_outstanding")
     if not shares_outstanding or shares_outstanding <= 0:
         raise ValidationError("shares_outstanding must be provided and positive")
 

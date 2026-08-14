@@ -371,14 +371,23 @@ Based on the analysis, the recommended approach is a **simplified DCF model** th
 
 #### Step 7: Calculate Per-Share Intrinsic Value
 
-**Final Step:** Total Intrinsic Value ÷ Shares Outstanding
+**Final Step:** Total Intrinsic Value ÷ Diluted Shares Outstanding
 
 **Where to Find Shares Outstanding:**
-- Company investor relations page (most accurate)
+- **Preferred:** Use `diluted_shares_outstanding` returned directly by the
+  financialcalc tools (`get_current_metrics` / `get_financial_data`).
+  It is derived from market_cap / price (with net_income / diluted_eps as
+  fallback), which captures options, RSUs, and warrants.
+- Company investor relations page (most accurate, if manually verifying)
 - Financial websites (may have errors)
 - Look for: "Shares Outstanding - Diluted"
 
+**NEVER use basic shares outstanding for the per-share division** — basic
+counts omit dilutive securities and systematically overstate per-share value
+(by ~60% for high-SBC companies like DLO, typically 2-8% for large caps).
+
 **Verification:**
+- diluted_shares × current_price should ≈ market_cap (within 10%)
 - Check from multiple sources
 - For companies with multiple share classes, sum all classes
 - Critical to get this number correct

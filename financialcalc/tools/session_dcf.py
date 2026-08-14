@@ -200,10 +200,12 @@ def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
         if total_cash is not None and total_debt is not None:
             net_cash = total_cash - total_debt
     
-    # Get shares outstanding
+    # Get shares outstanding (prefer diluted for DCF)
     shares = None
+    diluted_shares = None
     current_metrics = session.get("current_metrics")
     if current_metrics:
+        diluted_shares = current_metrics.get("diluted_shares_outstanding")
         shares = current_metrics.get("shares_outstanding")
     
     # Generate guidance
@@ -247,6 +249,7 @@ def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
         "historical_cagr": cagr_result.get("cagr") if cagr_result else None,
         "net_cash": round(net_cash, 2),
         "shares_outstanding": shares,
+        "diluted_shares_outstanding": diluted_shares or shares,
         "available_fcf_years": len([v for v in financial_data.get("free_cash_flow", []) if v is not None]),
         "guidance": guidance,
     }
@@ -341,25 +344,40 @@ def run_dcf_analysis(
             if total_cash is not None and total_debt is not None:
                 net_cash = total_cash - total_debt
     
-    # Get shares outstanding
+    # Get shares outstanding — prefer diluted (per IV_Distilled.md methodology)
+    shares_basis = "override"
     if shares_override is not None:
         shares = shares_override
     else:
         shares = None
         current_metrics = session.get("current_metrics")
         if current_metrics:
-            shares = current_metrics.get("shares_outstanding")
-        
+            shares = current_metrics.get("diluted_shares_outstanding")
+            if shares:
+                shares_basis = "diluted"
+            if not shares:
+                shares = current_metrics.get("shares_outstanding")
+                if shares:
+                    shares_basis = "basic"
+
         if not shares:
             # Try to get from financial data
-            shares = financial_data.get("shares_outstanding")
-        
+            financial_data_shares = financial_data.get("diluted_shares_outstanding")
+            if financial_data_shares:
+                shares = financial_data_shares
+                shares_basis = "diluted"
+            else:
+                shares = financial_data.get("shares_outstanding")
+                if shares:
+                    shares_basis = "basic"
+
         if not shares:
             raise ValidationError(
                 "Shares outstanding not available. Provide shares_override or "
                 "ensure get_current_metrics was called."
             )
-    
+
+    assert shares is not None
     # Run DCF calculations
     years = len(growth_rates)
     
@@ -425,6 +443,7 @@ def run_dcf_analysis(
         "net_cash": round(net_cash, 2),
         "total_equity_value": round(iv_result["enterprise_value"] + net_cash, 2),
         "shares_outstanding": shares,
+        "shares_basis": shares_basis,
         "intrinsic_value": round(intrinsic_value, 2),
         "buy_price": round(buy_price, 2),
         "current_price": current_price,
@@ -443,7 +462,7 @@ def run_dcf_analysis(
             f"Enterprise value: ${iv_result['enterprise_value']/1e9:.2f}B",
             f"Net cash/debt: ${net_cash/1e9:.2f}B",
             f"Equity value: ${(iv_result['enterprise_value'] + net_cash)/1e9:.2f}B",
-            f"Shares outstanding: {shares/1e6:.1f}M",
+            f"Shares outstanding ({shares_basis}): {shares/1e6:.1f}M",
             f"Intrinsic value per share: ${intrinsic_value:.2f}",
             f"Buy price ({margin_of_safety}% MoS): ${buy_price:.2f}",
         ],

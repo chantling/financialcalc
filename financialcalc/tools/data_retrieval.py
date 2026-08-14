@@ -4,6 +4,7 @@ import logging
 import math
 from typing import Any, Dict, List, Optional
 
+import requests
 import yfinance as yf
 
 from financialcalc.utils.cache_manager import CACHE_TTL_SECONDS, SQLiteCache
@@ -117,9 +118,7 @@ def _get_exchange_rate_to_usd(financial_currency: Optional[str]) -> Optional[flo
             logger.info(f"Exchange rate {financial_currency}USD: {rate2}")
             return float(rate2)
 
-        logger.warning(
-            f"Could not fetch exchange rate for {financial_currency} to USD"
-        )
+        logger.warning(f"Could not fetch exchange rate for {financial_currency} to USD")
         return None
     except Exception as e:
         logger.warning(f"Failed to fetch exchange rate for {financial_currency}: {e}")
@@ -131,20 +130,6 @@ def _convert_array_to_usd(
 ) -> List[Optional[float]]:
     """Convert a list of monetary values to USD using the given exchange rate."""
     return [round(v * rate, 2) if v is not None else None for v in values]
-
-
-def _get_shares_from_info(ticker: yf.Ticker) -> Optional[int]:
-    """Try multiple methods to get shares outstanding from ticker info.
-
-    Prefers impliedSharesOutstanding (derived from market_cap / price, captures
-    all share classes for multi-class companies like GOOG) over sharesOutstanding
-    (which may report only a single class).
-    """
-    info = ticker.info
-    shares = _safe_int(info.get("impliedSharesOutstanding"))
-    if shares is None:
-        shares = _safe_int(info.get("sharesOutstanding"))
-    return shares
 
 
 def _get_shares_from_balance_sheet(
@@ -161,6 +146,192 @@ def _get_shares_from_balance_sheet(
         if values:
             return values
     return []
+
+
+def _get_diluted_shares_from_income_stmt(
+    income_stmt: Any, years: int
+) -> List[Optional[float]]:
+    """Derive diluted shares outstanding from net income / diluted EPS.
+
+    yfinance income statements include "Diluted EPS" and "Net Income" rows.
+    Diluted shares = net_income / diluted_eps captures all dilutive securities
+    (options, RSUs, warrants, convertibles).
+
+    Returns a time series (oldest first) of diluted share counts, or empty list
+    if the required rows are unavailable.
+    """
+    diluted_eps = _extract_series(income_stmt, "Diluted EPS", years)
+    net_income = _extract_series(income_stmt, "Net Income", years)
+
+    if not diluted_eps or not net_income:
+        return []
+
+    result: List[Optional[float]] = []
+    for eps, ni in zip(diluted_eps, net_income):
+        if eps is not None and ni is not None and eps > 0:
+            result.append(ni / eps)
+        else:
+            result.append(None)
+    return result
+
+
+def _get_diluted_shares_from_info(info: Dict[str, Any]) -> Optional[int]:
+    """Derive diluted shares from market_cap / current_price.
+
+    Market capitalization inherently prices in future dilution from options
+    and RSUs, so market_cap / price gives a diluted-equivalent share count.
+    This is the same logic yfinance uses for 'impliedSharesOutstanding'.
+
+    Returns None if market_cap or price is missing/invalid.
+    """
+    market_cap = _safe_float(info.get("marketCap"))
+    price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+    if market_cap is not None and market_cap > 0 and price is not None and price > 0:
+        return int(market_cap / price)
+    return None
+
+
+def _resolve_shares_outstanding(
+    ticker: Optional[yf.Ticker],
+    info: Optional[Dict[str, Any]],
+    income_stmt: Any = None,
+    balance_sheet: Any = None,
+    years: int = 5,
+) -> Dict[str, Optional[int]]:
+    """Unified share-count resolver with consistent fallback logic.
+
+    Returns a dict with:
+        - 'shares_outstanding': basic/implied count (for compatibility)
+        - 'diluted_shares_outstanding': diluted count (preferred for DCF)
+
+    Resolution order for diluted:
+        1. market_cap / price (most accurate, captures all dilution)
+        2. net_income / diluted_eps from income statement
+        3. impliedSharesOutstanding from info
+        4. Fall back to basic shares (last resort)
+
+    Resolution order for basic:
+        1. impliedSharesOutstanding (captures multi-class, ~basic)
+        2. sharesOutstanding (filing cover page)
+        3. Balance sheet fields
+    """
+    if info is None and ticker is not None:
+        info = ticker.info
+    if info is None:
+        info = {}
+
+    # --- Diluted ---
+    diluted = _get_diluted_shares_from_info(info)
+    if diluted is None and income_stmt is not None:
+        ds_series = _get_diluted_shares_from_income_stmt(income_stmt, years)
+        if ds_series:
+            for v in reversed(ds_series):
+                if v is not None and v > 0:
+                    diluted = int(v)
+                    break
+    if diluted is None:
+        diluted = _safe_int(info.get("impliedSharesOutstanding"))
+
+    # --- Basic (unchained for backward compatibility) ---
+    basic = _safe_int(info.get("impliedSharesOutstanding"))
+    if basic is None:
+        basic = _safe_int(info.get("sharesOutstanding"))
+    if basic is None and balance_sheet is not None:
+        bs_shares = _get_shares_from_balance_sheet(balance_sheet, years)
+        if bs_shares:
+            for v in reversed(bs_shares):
+                if v is not None:
+                    basic = int(v)
+                    break
+
+    # If diluted failed entirely, use basic as the fallback.
+    if diluted is None:
+        diluted = basic
+
+    return {
+        "shares_outstanding": basic,
+        "diluted_shares_outstanding": diluted,
+    }
+
+
+def _get_overview_from_alpha_vantage(symbol: str) -> Dict[str, Any]:
+    """Fetch market cap and shares outstanding from Alpha Vantage OVERVIEW.
+
+    A single OVERVIEW call returns both MarketCapitalization and
+    SharesOutstanding. This is used as a last-resort fallback when Yahoo
+    Finance returns invalid (None/NaN/zero) data for both fields.
+
+    Results are cached for 7 days to conserve the 25 calls/day free-tier
+    quota. If no API key is configured, the request fails, or the data
+    is missing, an empty dict is returned (never raises).
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        Dict with optional keys 'market_cap' (int) and
+        'shares_outstanding' (int). Empty dict if unavailable.
+    """
+    api_key = settings.alpha_vantage_api_key
+    if not api_key:
+        logger.debug(
+            f"Alpha Vantage fallback skipped for {symbol}: no API key configured"
+        )
+        return {}
+
+    cache = _get_cache()
+    cache_key = "alpha_vantage_overview"
+
+    cached = cache.get(symbol, cache_key)
+    if cached:
+        logger.info(f"Alpha Vantage overview cache hit for {symbol}")
+        return cached
+
+    try:
+        url = "https://www.alphavantage.co/query"
+        params = {
+            "function": "OVERVIEW",
+            "symbol": symbol,
+            "apikey": api_key,
+        }
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+
+        if not data or "Symbol" not in data:
+            logger.warning(f"Alpha Vantage returned no data for {symbol}")
+            return {}
+
+        result: Dict[str, Any] = {}
+
+        market_cap = _safe_float(data.get("MarketCapitalization"))
+        if market_cap is not None and market_cap > 0:
+            result["market_cap"] = int(market_cap)
+
+        shares = _safe_float(data.get("SharesOutstanding"))
+        if shares is not None and shares > 0:
+            result["shares_outstanding"] = int(shares)
+
+        if result:
+            cache.set(symbol, cache_key, result, CACHE_TTL_SECONDS[cache_key])
+            logger.info(
+                f"Alpha Vantage fallback for {symbol}: "
+                f"market_cap={result.get('market_cap')}, "
+                f"shares={result.get('shares_outstanding')}"
+            )
+        else:
+            logger.warning(
+                f"Alpha Vantage returned no valid market cap or shares for {symbol}"
+            )
+
+        return result
+
+    except requests.RequestException as e:
+        logger.warning(f"Alpha Vantage request failed for {symbol}: {e}")
+        return {}
+    except Exception as e:
+        logger.warning(f"Alpha Vantage fallback error for {symbol}: {e}")
+        return {}
 
 
 def get_financial_data(
@@ -203,10 +374,13 @@ def get_financial_data(
             logger.info(f"Cache hit for {symbol} historical data ({years} years)")
             cached["cached"] = True
             # Store in session for subsequent tool calls (even when cached)
-            session_manager.update_session(symbol, {
-                "financial_data": cached,
-                "symbol": symbol,
-            })
+            session_manager.update_session(
+                symbol,
+                {
+                    "financial_data": cached,
+                    "symbol": symbol,
+                },
+            )
             logger.info(f"Stored financial data in session for {symbol} (from cache)")
             return cached
 
@@ -252,17 +426,19 @@ def get_financial_data(
         capex = _extract_series(cash_flow, "Capital Expenditure", years)
         sbc = _extract_series(cash_flow, "Stock Based Compensation", years)
 
-        # Shares outstanding - try info first, then balance sheet
-        shares_outstanding = _get_shares_from_info(ticker)
+        # Shares outstanding — use unified resolver (diluted + basic)
+        balance_sheet = ticker.balance_sheet
+        shares_resolved = _resolve_shares_outstanding(
+            ticker=ticker,
+            info=ticker.info,
+            income_stmt=income_stmt,
+            balance_sheet=balance_sheet,
+            years=years,
+        )
+        shares_outstanding = shares_resolved["shares_outstanding"]
+        diluted_shares_outstanding = shares_resolved["diluted_shares_outstanding"]
         if shares_outstanding is None:
-            balance_sheet = ticker.balance_sheet
-            bs_shares = _get_shares_from_balance_sheet(balance_sheet, years)
-            if bs_shares:
-                # Use the most recent non-None value
-                for v in reversed(bs_shares):
-                    if v is not None:
-                        shares_outstanding = int(v)
-                        break
+            shares_outstanding = diluted_shares_outstanding
 
         # Dates - use whichever statement has more years to match data length
         inc_dates = _get_dates(income_stmt, years)
@@ -356,7 +532,9 @@ def get_financial_data(
             "actual_years_available": max_len,
             "dates": dates,
             "original_currency": financial_currency,
-            "exchange_rate_used": round(exchange_rate, 6) if exchange_rate is not None else None,
+            "exchange_rate_used": (
+                round(exchange_rate, 6) if exchange_rate is not None else None
+            ),
             "revenue": [round(float(r), 2) if r is not None else None for r in revenue],
             "net_income": [
                 round(float(n), 2) if n is not None else None for n in net_income
@@ -375,6 +553,7 @@ def get_financial_data(
             ],
             "sbc_adjusted_fcf": sbc_adjusted_fcf,
             "shares_outstanding": shares_outstanding,
+            "diluted_shares_outstanding": diluted_shares_outstanding,
             "basic_eps": [round(float(e), 2) if e is not None else None for e in eps],
             "cached": False,
         }
@@ -385,10 +564,13 @@ def get_financial_data(
         cache.set(symbol, cache_key, data, CACHE_TTL_SECONDS["historical_fcf"])
 
         # Store in session for subsequent tool calls
-        session_manager.update_session(symbol, {
-            "financial_data": data,
-            "symbol": symbol,
-        })
+        session_manager.update_session(
+            symbol,
+            {
+                "financial_data": data,
+                "symbol": symbol,
+            },
+        )
         logger.info(f"Stored financial data in session for {symbol}")
 
         return data
@@ -580,8 +762,12 @@ def get_balance_sheet(
             total_cash = _convert_array_to_usd(total_cash, exchange_rate)
             short_term_debt = _convert_array_to_usd(short_term_debt, exchange_rate)
             long_term_debt = _convert_array_to_usd(long_term_debt, exchange_rate)
-            cash_and_equivalents = _convert_array_to_usd(cash_and_equivalents, exchange_rate)
-            short_term_investments = _convert_array_to_usd(short_term_investments, exchange_rate)
+            cash_and_equivalents = _convert_array_to_usd(
+                cash_and_equivalents, exchange_rate
+            )
+            short_term_investments = _convert_array_to_usd(
+                short_term_investments, exchange_rate
+            )
             goodwill = _convert_array_to_usd(goodwill, exchange_rate)
             intangible_assets = _convert_array_to_usd(intangible_assets, exchange_rate)
             logger.info(
@@ -596,7 +782,9 @@ def get_balance_sheet(
             "actual_years_available": len(dates),
             "dates": dates,
             "original_currency": financial_currency,
-            "exchange_rate_used": round(exchange_rate, 6) if exchange_rate is not None else None,
+            "exchange_rate_used": (
+                round(exchange_rate, 6) if exchange_rate is not None else None
+            ),
             "total_assets": [
                 round(float(v), 2) if v is not None else None for v in total_assets
             ],
@@ -753,7 +941,9 @@ def get_raw_financial_statements(
             "actual_years_available": len(dates),
             "dates": dates,
             "original_currency": financial_currency,
-            "exchange_rate_used": round(exchange_rate, 6) if exchange_rate is not None else None,
+            "exchange_rate_used": (
+                round(exchange_rate, 6) if exchange_rate is not None else None
+            ),
             "line_items": line_items,
             "cached": False,
         }
@@ -805,7 +995,9 @@ def get_current_metrics(
         cached_price = cache.get(symbol, "current_price")
         cached_mc = cache.get(symbol, "market_cap")
         cached_shares = cache.get(symbol, "shares_outstanding")
-        cached_company = cache.get(symbol, "company_info") if include_company_info else None
+        cached_company = (
+            cache.get(symbol, "company_info") if include_company_info else None
+        )
 
         if cached_price and cached_mc and cached_shares:
             result = {
@@ -813,6 +1005,9 @@ def get_current_metrics(
                 "current_price": cached_price["price"],
                 "market_cap": cached_mc["market_cap"],
                 "shares_outstanding": cached_shares["shares"],
+                "diluted_shares_outstanding": cached_shares.get(
+                    "diluted", cached_shares["shares"]
+                ),
                 "previous_close": cached_price.get("previous_close"),
                 "trading_currency": cached_price.get("trading_currency", "USD"),
                 "cached": True,
@@ -853,10 +1048,50 @@ def get_current_metrics(
         if previous_close is None:
             previous_close = info.get("regularMarketPreviousClose")
 
+        # Resolve shares using the unified resolver (diluted + basic)
+        shares_resolved = _resolve_shares_outstanding(
+            ticker=ticker,
+            info=info,
+            income_stmt=ticker.income_stmt,
+        )
+        shares_outstanding = shares_resolved["shares_outstanding"] or 0
+        diluted_shares_outstanding = shares_resolved["diluted_shares_outstanding"] or 0
+
         market_cap = info.get("marketCap", 0)
-        shares_outstanding = info.get("impliedSharesOutstanding", 0)
-        if shares_outstanding == 0:
-            shares_outstanding = info.get("sharesOutstanding", 0)
+
+        # Fallback: if market_cap is invalid (None/NaN/0/non-numeric),
+        # try computing from shares x price, then Alpha Vantage as last resort
+        mc_float = _safe_float(market_cap)
+        if mc_float is None or mc_float <= 0:
+            # Prefer diluted shares for the computation
+            shares_for_calc = diluted_shares_outstanding or shares_outstanding
+            shares_int = _safe_int(shares_for_calc)
+            price_float = _safe_float(current_price)
+            if (
+                shares_int is not None
+                and shares_int > 0
+                and price_float is not None
+                and price_float > 0
+            ):
+                market_cap = int(shares_int * price_float)
+                logger.info(
+                    f"Computed market_cap for {symbol} from "
+                    f"shares_outstanding x current_price"
+                )
+            else:
+                av_data = _get_overview_from_alpha_vantage(symbol)
+                if av_data:
+                    av_mc = av_data.get("market_cap")
+                    av_shares = av_data.get("shares_outstanding")
+                    if av_mc is not None:
+                        market_cap = av_mc
+                    if av_shares is not None and (
+                        shares_int is None or shares_int <= 0
+                    ):
+                        shares_outstanding = av_shares
+                        if not diluted_shares_outstanding:
+                            diluted_shares_outstanding = av_shares
+                    logger.info(f"Used Alpha Vantage fallback data for {symbol}")
 
         price_data = {
             "price": current_price,
@@ -873,7 +1108,10 @@ def get_current_metrics(
         mc_data = {"market_cap": market_cap}
         cache.set(symbol, "market_cap", mc_data, CACHE_TTL_SECONDS["market_cap"])
 
-        shares_data = {"shares": shares_outstanding}
+        shares_data = {
+            "shares": shares_outstanding,
+            "diluted": diluted_shares_outstanding or shares_outstanding,
+        }
         cache.set(
             symbol,
             "shares_outstanding",
@@ -894,6 +1132,11 @@ def get_current_metrics(
             "current_price": round(current_price, 2),
             "market_cap": int(market_cap),
             "shares_outstanding": int(shares_outstanding),
+            "diluted_shares_outstanding": (
+                int(diluted_shares_outstanding)
+                if diluted_shares_outstanding
+                else int(shares_outstanding)
+            ),
             "previous_close": (round(previous_close, 2) if previous_close else None),
             "trading_currency": info.get("currency", "USD"),
             "cached": False,
