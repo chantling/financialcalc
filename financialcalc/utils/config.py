@@ -1,5 +1,7 @@
 """Configuration management for FinancialCalc MCP Server"""
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 
@@ -12,6 +14,8 @@ class Settings(BaseSettings):
     yfinance_timeout: int = 30
     max_retries: int = 3
     retry_delay: int = 2
+
+    alpha_vantage_api_key: Optional[str] = None
 
     host: str = "0.0.0.0"
     port: int = 3000

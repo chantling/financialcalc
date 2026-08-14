@@ -22,6 +22,7 @@ CACHE_TTL_SECONDS = {
     "basic_eps": 604800,
     "balance_sheet": 604800,
     "raw_statements": 604800,
+    "alpha_vantage_overview": 604800,
 }
 
 
@@ -39,8 +40,7 @@ class SQLiteCache(CacheBackend):
         """Initialize database schema and enable WAL mode"""
         conn = sqlite3.connect(str(self.db_path))
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS cached_data (
                 symbol TEXT NOT NULL,
                 data_type TEXT NOT NULL,
@@ -51,8 +51,7 @@ class SQLiteCache(CacheBackend):
                 access_count INTEGER DEFAULT 0,
                 UNIQUE(symbol, data_type)
             )
-        """
-        )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol ON cached_data(symbol)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_expires_at ON cached_data(expires_at)"
