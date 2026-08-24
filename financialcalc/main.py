@@ -11,6 +11,10 @@ from financialcalc.tools.analysis_support import (
     calculate_margin_of_safety, calculate_probability_weighted,
     calculate_sensitivity_analysis, calculate_sotp_valuation,
     normalize_base_value)
+from financialcalc.tools.assumption_registry import (
+    get_prior_assumptions,
+    register_assumptions,
+)
 from financialcalc.tools.batch_operations import run_complete_dcf_analysis
 from financialcalc.tools.core_calculations import (calculate_cagr,
                                                    calculate_custom_fcf,
@@ -29,6 +33,7 @@ from financialcalc.tools.report_generation import (generate_analysis_report,
                                                    generate_scenario_report)
 from financialcalc.tools.session_dcf import (get_base_fcf_options,
                                              run_dcf_analysis)
+from financialcalc.tools.wacc import calculate_wacc
 from financialcalc.utils.error_handling import FinancialCalcError
 
 logging.basicConfig(level=logging.INFO)
@@ -544,7 +549,10 @@ TOOLS: list[Tool] = [
         name="run_complete_dcf_analysis",
         description="Execute complete DCF analysis with user-supplied assumptions. "
         "LLM agent supplies base_fcf, growth_rates, discount_rate, terminal_multiple, "
-        "margin_of_safety, and optionally net_cash. Server performs all calculations.",
+        "margin_of_safety, and optionally net_cash. Server performs all calculations. "
+        "Assumptions are HARD-VALIDATED against the company's registry: call "
+        "get_prior_assumptions first and reuse the registered methodology; deviations "
+        "raise an error unless override_reason is supplied.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -586,6 +594,17 @@ TOOLS: list[Tool] = [
                             "description": "Override shares from financial_data "
                             "(use diluted count; defaults to diluted_shares_outstanding)",
                         },
+                        "base_fcf_method": {
+                            "type": "string",
+                            "description": "Base FCF method name for registry "
+                            "matching (most_recent/average/median/sbc_adjusted/"
+                            "normalized)",
+                        },
+                        "override_reason": {
+                            "type": "string",
+                            "description": "Required ONLY when assumptions deviate "
+                            "from the registry; must cite the changed fundamental",
+                        },
                     },
                     "required": [
                         "base_fcf",
@@ -597,6 +616,114 @@ TOOLS: list[Tool] = [
                 },
             },
             "required": ["financial_data", "assumptions"],
+        },
+    ),
+    # --- Discount Rate & Assumption Registry ---
+    Tool(
+        name="calculate_wacc",
+        description="Calculate company-specific WACC as the discount-rate baseline. "
+        "Cost of equity via CAPM (10Y Treasury rf + beta x ERP) plus a country "
+        "risk premium for foreign issuers; cost of debt from interest expense / "
+        "total debt; market-cap weights. Financial companies return cost of "
+        "equity only. Result clamped to 6-15%. Call before the first DCF for a "
+        "company; afterwards the registered discount rate governs.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock ticker symbol",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Bypass the 7-day WACC input cache",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
+        name="get_prior_assumptions",
+        description="MUST CALL before run_dcf_analysis. Returns the registered "
+        "canonical methodology for a company (projection period, terminal "
+        "multiple, discount rate, base FCF method, growth schedule), the "
+        "smoothed intrinsic value from analysis history, and the moat-based "
+        "terminal-multiple rubric for first analyses. Re-analyses MUST reuse "
+        "the registered assumptions exactly.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "ticker": {
+                    "type": "string",
+                    "description": "Stock ticker symbol",
+                },
+            },
+            "required": ["ticker"],
+        },
+    ),
+    Tool(
+        name="register_assumptions",
+        description="Register or update the canonical DCF assumptions for a "
+        "company. Call after the FIRST successful DCF (to lock in methodology) "
+        "and after any accepted override (to record the change). Terminal "
+        "multiple must fall within the eight-pillar moat rubric band. Updates "
+        "require a substantive reason; all changes are logged with old/new "
+        "values.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "ticker": {
+                    "type": "string",
+                    "description": "Stock ticker symbol",
+                },
+                "projection_period": {
+                    "type": "integer",
+                    "enum": [5, 10],
+                    "description": "Projection period in years (5 or 10)",
+                },
+                "terminal_multiple": {
+                    "type": "number",
+                    "description": "Terminal multiple (within moat rubric band)",
+                },
+                "discount_rate": {
+                    "type": "number",
+                    "description": "Discount rate as percentage (near WACC baseline)",
+                },
+                "base_fcf_method": {
+                    "type": "string",
+                    "enum": [
+                        "most_recent",
+                        "average",
+                        "median",
+                        "sbc_adjusted",
+                        "normalized",
+                    ],
+                    "default": "median",
+                    "description": "Base FCF calculation method",
+                },
+                "growth_schedule": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Per-year growth rates (percent) used in the DCF",
+                },
+                "moat_pct": {
+                    "type": "number",
+                    "description": "Eight-pillar percentage at lock time "
+                    "(auto-read from session if omitted)",
+                },
+                "reason": {
+                    "type": "string",
+                    "default": "initial registration",
+                    "description": "Reason for the change (required for updates)",
+                },
+            },
+            "required": [
+                "ticker",
+                "projection_period",
+                "terminal_multiple",
+                "discount_rate",
+            ],
         },
     ),
     # --- Session-Based Tools (Recommended) ---
@@ -621,6 +748,9 @@ TOOLS: list[Tool] = [
         name="run_dcf_analysis",
         description="Run DCF analysis using data from session. RECOMMENDED over run_complete_dcf_analysis. "
         "Pulls all data automatically from session - agent only needs to provide assumptions. "
+        "Assumptions are HARD-VALIDATED against the company's registry entry: call "
+        "get_prior_assumptions first and reuse the registered methodology. Deviations "
+        "raise an error unless override_reason cites the changed fundamental. "
         "Includes validation warnings and confidence scoring. "
         "Session is created when get_financial_data is called.",
         inputSchema={
@@ -633,16 +763,19 @@ TOOLS: list[Tool] = [
                 "growth_rates": {
                     "type": "array",
                     "items": {"type": "number"},
-                    "description": "Array of growth rates for each projection year (typically 10 years)",
+                    "description": "Array of growth rates for each projection year - "
+                    "length MUST match the registered projection period",
                 },
                 "terminal_multiple": {
                     "type": "number",
-                    "description": "Terminal value multiple (e.g., 15 for 15x)",
+                    "description": "Terminal value multiple (e.g., 15 for 15x) - must "
+                    "be within ±1x of the registered value",
                 },
                 "discount_rate": {
                     "type": "number",
                     "default": 10.0,
-                    "description": "Discount rate as percentage (default: 10%)",
+                    "description": "Discount rate as percentage - must be within ±1pp "
+                    "of the registered value (or ±2pp of calculated WACC on first run)",
                 },
                 "margin_of_safety": {
                     "type": "number",
@@ -659,7 +792,8 @@ TOOLS: list[Tool] = [
                         "normalized",
                     ],
                     "default": "most_recent",
-                    "description": "Method for calculating base FCF (default: most_recent)",
+                    "description": "Method for calculating base FCF (default: most_recent) "
+                    "- must match the registered method",
                 },
                 "net_cash_override": {
                     "type": "number",
@@ -669,6 +803,13 @@ TOOLS: list[Tool] = [
                     "type": "number",
                     "description": "Override shares outstanding (optional; use diluted "
                     "count. Defaults to diluted_shares_outstanding from session)",
+                },
+                "override_reason": {
+                    "type": "string",
+                    "description": "Required ONLY when assumptions deviate from the "
+                    "registry. Must cite the specific changed fundamental (new filing, "
+                    "guidance change, FCF collapse). After an accepted override, call "
+                    "register_assumptions to update the registry.",
                 },
             },
             "required": ["session_id", "growth_rates", "terminal_multiple"],
@@ -774,6 +915,11 @@ TOOL_FUNCTIONS = {
     "calculate_net_debt": calculate_net_debt,
     "calculate_graham_formula": calculate_graham_formula,
     "calculate_custom_fcf": calculate_custom_fcf,
+    # Discount rate baseline
+    "calculate_wacc": calculate_wacc,
+    # Assumption registry
+    "get_prior_assumptions": get_prior_assumptions,
+    "register_assumptions": register_assumptions,
     # Analysis support
     "calculate_margin_of_safety": calculate_margin_of_safety,
     "calculate_sensitivity_analysis": calculate_sensitivity_analysis,

@@ -23,6 +23,8 @@ CACHE_TTL_SECONDS = {
     "balance_sheet": 604800,
     "raw_statements": 604800,
     "alpha_vantage_overview": 604800,
+    "risk_free_rate": 86400,
+    "wacc_inputs": 604800,
 }
 
 

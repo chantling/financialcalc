@@ -1,8 +1,15 @@
 """Batch operations for complete workflows"""
 
+import logging
+from typing import Optional
+
 from financialcalc.tools.analysis_support import (
     calculate_margin_of_safety,
     calculate_sensitivity_analysis,
+)
+from financialcalc.tools.assumption_registry import (
+    _read_registry_row,
+    normalize_ticker,
 )
 from financialcalc.tools.core_calculations import (
     calculate_cagr,
@@ -12,13 +19,22 @@ from financialcalc.tools.core_calculations import (
     project_cash_flows,
 )
 from financialcalc.utils.error_handling import ValidationError
+from financialcalc.utils.validation import validate_against_registry
+
+logger = logging.getLogger(__name__)
 
 
-def run_complete_dcf_analysis(financial_data: dict, assumptions: dict) -> dict:
+def run_complete_dcf_analysis(
+    financial_data: dict, assumptions: dict, override_reason: Optional[str] = None
+) -> dict:
     """Execute complete DCF analysis with user-supplied assumptions.
 
     Redesigned interface: The LLM agent supplies ALL key parameters.
     This tool performs the calculations accurately.
+
+    Assumptions are validated against the per-company registry (hard reject
+    on deviation unless override_reason is supplied). Call
+    get_prior_assumptions first to read the registered methodology.
 
     Args:
         financial_data: Retrieved financial data (from get_financial_data).
@@ -33,6 +49,11 @@ def run_complete_dcf_analysis(financial_data: dict, assumptions: dict) -> dict:
             - shares_outstanding (float, optional): Override shares from
               financial_data. When not provided, diluted_shares_outstanding
               is preferred over basic shares_outstanding per methodology.
+            - base_fcf_method (str, optional): Method name for registry matching
+            - override_reason (str, optional): Required when deviating from
+              the registry; must cite the changed fundamental
+        override_reason: Override reason as a direct argument (alternative to
+            placing it in assumptions)
 
     Returns:
         Complete analysis results including projected_flows, pv, tv, iv,
@@ -55,6 +76,46 @@ def run_complete_dcf_analysis(financial_data: dict, assumptions: dict) -> dict:
     terminal_multiple = assumptions["terminal_multiple"]
     margin_of_safety = assumptions["margin_of_safety"]
     net_cash = assumptions.get("net_cash", 0)
+    reason = override_reason or assumptions.get("override_reason")
+
+    # Registry guardrails (hard reject unless override_reason supplied)
+    canonical = normalize_ticker(financial_data.get("symbol", ""))
+    registry_entry = _read_registry_row(canonical) if canonical else None
+    wacc_baseline = None
+    if registry_entry is None and canonical:
+        try:
+            from financialcalc.tools.wacc import calculate_wacc
+
+            wacc_result = calculate_wacc(canonical)
+            wacc_baseline = wacc_result.get("wacc")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"WACC calculation unavailable for {canonical}: {e}")
+
+    violations = validate_against_registry(
+        growth_rates,
+        terminal_multiple,
+        discount_rate,
+        base_fcf_method=assumptions.get("base_fcf_method"),
+        registry=registry_entry,
+        wacc_baseline=wacc_baseline,
+    )
+    overridden = bool(violations and reason and str(reason).strip())
+    registry_match = {
+        "ticker": canonical,
+        "registered": registry_entry is not None,
+        "violations": violations,
+        "overridden": overridden,
+        "override_reason": reason if overridden else None,
+    }
+    if violations and not overridden:
+        raise ValidationError(
+            "Assumption guardrails violated: "
+            + "; ".join(violations)
+            + ". Re-run with assumptions matching the registry (see "
+            "get_prior_assumptions), or supply override_reason citing the "
+            "changed fundamental. After an accepted override, call "
+            "register_assumptions to update the registry."
+        )
 
     # Get shares outstanding from assumptions or financial_data
     # Prefer diluted (per IV_Distilled.md methodology); fall back to basic.
@@ -167,6 +228,8 @@ def run_complete_dcf_analysis(financial_data: dict, assumptions: dict) -> dict:
         "intrinsic_value": iv_result["intrinsic_value"],
         "buy_price": mos_result["buy_price"],
         "margin_of_safety": margin_of_safety,
+        "registry_match": registry_match,
+        "wacc_baseline": wacc_baseline,
         "sensitivity_analysis": sensitivity_result,
         "calculation_log": calculation_log,
     }

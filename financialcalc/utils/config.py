@@ -17,6 +17,17 @@ class Settings(BaseSettings):
 
     alpha_vantage_api_key: Optional[str] = None
 
+    iv_tracker_db_path: str = (
+        r"C:\Users\John\Documents\#Python#\#Financial#\IV-Tracker\data\iv_tracker.db"
+    )
+
+    # WACC / CAPM inputs
+    risk_free_rate: float = 4.3      # fallback when ^TNX fetch fails (percent)
+    equity_risk_premium: float = 5.0 # percent
+    wacc_min: float = 6.0            # clamp bounds (percent)
+    wacc_max: float = 15.0
+    default_corporate_tax_rate: float = 21.0
+
     host: str = "0.0.0.0"
     port: int = 3000
     log_level: str = "INFO"

@@ -7,6 +7,10 @@ state between tool calls, eliminating the need for agents to pass data between t
 import logging
 from typing import Any, Dict, List, Optional
 
+from financialcalc.tools.assumption_registry import (
+    _read_registry_row,
+    normalize_ticker,
+)
 from financialcalc.tools.core_calculations import (
     calculate_cagr,
     calculate_intrinsic_value,
@@ -20,6 +24,7 @@ from financialcalc.utils.validation import (
     assess_valuation,
     calculate_confidence_score,
     validate_assumptions,
+    validate_against_registry,
 )
 
 logger = logging.getLogger(__name__)
@@ -269,12 +274,17 @@ def run_dcf_analysis(
     base_fcf_method: str = "most_recent",
     net_cash_override: Optional[float] = None,
     shares_override: Optional[float] = None,
+    override_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run DCF analysis using data from session.
     
     This is the primary DCF analysis tool. It pulls all required data from
     the session and performs calculations without the agent needing to pass
     data between tools.
+    
+    Assumptions are validated against the per-company registry (hard reject
+    on deviation unless override_reason is supplied). Call
+    get_prior_assumptions first to read the registered methodology.
     
     Args:
         session_id: Session identifier (typically ticker symbol)
@@ -285,6 +295,8 @@ def run_dcf_analysis(
         base_fcf_method: Method for calculating base FCF (default: "most_recent")
         net_cash_override: Override net cash/debt position (optional)
         shares_override: Override shares outstanding (optional)
+        override_reason: Required to proceed when assumptions violate the
+            registry guardrails; must cite the changed fundamental (optional)
     
     Returns:
         Complete DCF analysis results with validation warnings
@@ -327,7 +339,45 @@ def run_dcf_analysis(
         historical_cagr=historical_cagr,
         company_revenue=company_revenue,
     )
-    
+
+    # Registry guardrails (hard reject unless override_reason supplied)
+    canonical = normalize_ticker(session.get("symbol", session_id))
+    registry_entry = _read_registry_row(canonical)
+    wacc_baseline = None
+    if registry_entry is None:
+        try:
+            from financialcalc.tools.wacc import calculate_wacc
+
+            wacc_result = calculate_wacc(canonical)
+            wacc_baseline = wacc_result.get("wacc")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"WACC calculation unavailable for {canonical}: {e}")
+
+    violations = validate_against_registry(
+        growth_rates,
+        terminal_multiple,
+        discount_rate,
+        base_fcf_method=base_fcf_method,
+        registry=registry_entry,
+        wacc_baseline=wacc_baseline,
+    )
+    overridden = bool(violations and override_reason and override_reason.strip())
+    registry_match = {
+        "ticker": canonical,
+        "registered": registry_entry is not None,
+        "violations": violations,
+        "overridden": overridden,
+        "override_reason": override_reason if overridden else None,
+    }
+    if violations and not overridden:
+        raise ValidationError(
+            "Assumption guardrails violated: " + "; ".join(violations)
+            + ". Re-run with assumptions matching the registry (see "
+            "get_prior_assumptions), or pass override_reason citing the "
+            "changed fundamental. After an accepted override, call "
+            "register_assumptions to update the registry."
+        )
+
     # Calculate base FCF
     base_fcf_result = calculate_base_fcf(financial_data, base_fcf_method)
     base_fcf = base_fcf_result["base_fcf"]
@@ -450,7 +500,11 @@ def run_dcf_analysis(
         "confidence": confidence,
         "valuation": valuation,
         "validation_warnings": validation_warnings,
+        "registry_match": registry_match,
+        "wacc_baseline": wacc_baseline,
         "calculation_log": [
+            f"Registry: {'matched' if registry_match['registered'] and not violations else 'n/a'}"
+            + (f" (OVERRIDDEN: {override_reason})" if overridden else ""),
             f"Base FCF ({base_fcf_method}): ${base_fcf/1e9:.2f}B",
             f"Growth rates: {growth_rates}",
             f"Discount rate: {discount_rate}%",
