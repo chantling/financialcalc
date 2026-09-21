@@ -18,13 +18,14 @@ from financialcalc.tools.core_calculations import (
     calculate_terminal_value,
     project_cash_flows,
 )
+from financialcalc.tools.financials_valuation import classify_valuation_track
 from financialcalc.utils.error_handling import ValidationError
 from financialcalc.utils.session_manager import session_manager
 from financialcalc.utils.validation import (
     assess_valuation,
     calculate_confidence_score,
-    validate_assumptions,
     validate_against_registry,
+    validate_assumptions,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,13 +33,13 @@ logger = logging.getLogger(__name__)
 
 def _get_session_or_error(session_id: str) -> Dict[str, Any]:
     """Get session or raise error if not found.
-    
+
     Args:
         session_id: Session identifier
-        
+
     Returns:
         Session data dictionary
-        
+
     Raises:
         ValidationError: If session not found
     """
@@ -56,7 +57,7 @@ def calculate_base_fcf(
     method: str = "most_recent",
 ) -> Dict[str, Any]:
     """Calculate base FCF using specified method.
-    
+
     Args:
         financial_data: Financial data from get_financial_data
         method: Method for calculating base FCF:
@@ -65,24 +66,24 @@ def calculate_base_fcf(
             - "median": Median FCF over available years
             - "sbc_adjusted": FCF minus stock-based compensation
             - "normalized": Exclude outliers then average
-    
+
     Returns:
         Dictionary with base_fcf, method_used, and calculation details
     """
     fcf_values = financial_data.get("free_cash_flow", [])
     sbc_values = financial_data.get("stock_based_compensation", [])
-    
+
     # Filter out None values
     valid_fcf = [v for v in fcf_values if v is not None]
-    
+
     if not valid_fcf:
         raise ValidationError("No valid FCF data available")
-    
+
     if method == "most_recent":
         base_fcf = valid_fcf[-1]
         description = "Most recent year FCF"
         years_used = 1
-        
+
     elif method == "average":
         if len(valid_fcf) < 3:
             # Not enough data for 3-year average, use what's available
@@ -93,17 +94,17 @@ def calculate_base_fcf(
             base_fcf = sum(valid_fcf[-3:]) / 3
             description = "3-year average FCF"
             years_used = 3
-            
+
     elif method == "median":
         sorted_fcf = sorted(valid_fcf)
         n = len(sorted_fcf)
         if n % 2 == 0:
-            base_fcf = (sorted_fcf[n//2-1] + sorted_fcf[n//2]) / 2
+            base_fcf = (sorted_fcf[n // 2 - 1] + sorted_fcf[n // 2]) / 2
         else:
-            base_fcf = sorted_fcf[n//2]
+            base_fcf = sorted_fcf[n // 2]
         description = "Median FCF over available years"
         years_used = n
-        
+
     elif method == "sbc_adjusted":
         # Get most recent SBC-adjusted FCF
         if sbc_values:
@@ -111,7 +112,11 @@ def calculate_base_fcf(
             if valid_sbc:
                 # Find most recent year where both FCF and SBC exist
                 for i in range(len(fcf_values) - 1, -1, -1):
-                    if fcf_values[i] is not None and i < len(sbc_values) and sbc_values[i] is not None:
+                    if (
+                        fcf_values[i] is not None
+                        and i < len(sbc_values)
+                        and sbc_values[i] is not None
+                    ):
                         base_fcf = fcf_values[i] - sbc_values[i]
                         description = "Most recent SBC-adjusted FCF"
                         years_used = 1
@@ -129,7 +134,7 @@ def calculate_base_fcf(
             base_fcf = valid_fcf[-1]
             description = "Most recent FCF (SBC data not available)"
             years_used = 1
-            
+
     elif method == "normalized":
         if len(valid_fcf) < 3:
             # Not enough data to exclude outliers
@@ -144,7 +149,7 @@ def calculate_base_fcf(
             years_used = len(trimmed)
     else:
         raise ValidationError(f"Unknown base FCF method: {method}")
-    
+
     return {
         "base_fcf": round(base_fcf, 2),
         "method": method,
@@ -156,28 +161,28 @@ def calculate_base_fcf(
 
 def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
     """Get all available base FCF calculation options.
-    
+
     This tool helps the agent choose the most appropriate base FCF
     for the analysis by presenting all available options with guidance.
-    
+
     Args:
         session_id: Session identifier (typically ticker symbol)
-    
+
     Returns:
         Dictionary with all available base FCF options and guidance
     """
     session = _get_session_or_error(session_id)
-    
+
     if not session.get("financial_data"):
         raise ValidationError(
             "No financial data in session. Call get_financial_data first."
         )
-    
+
     financial_data = session["financial_data"]
-    
+
     # Calculate all available options
     options = {}
-    
+
     # Try each method
     for method in ["most_recent", "average", "median", "sbc_adjusted", "normalized"]:
         try:
@@ -185,7 +190,7 @@ def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
             options[method] = result
         except Exception as e:
             logger.debug(f"Could not calculate {method} base FCF: {e}")
-    
+
     # Get historical CAGR for reference
     cagr_result = None
     if "revenue" in financial_data:
@@ -195,16 +200,24 @@ def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
             session_manager.update_session(session_id, {"calculated_cagr": cagr_result})
         except Exception as e:
             logger.debug(f"Could not calculate revenue CAGR: {e}")
-    
+
     # Get net cash/debt position
     net_cash = 0
     balance_sheet = session.get("balance_sheet")
     if balance_sheet:
-        total_cash = balance_sheet.get("total_cash", [None])[-1] if balance_sheet.get("total_cash") else None
-        total_debt = balance_sheet.get("total_debt", [None])[-1] if balance_sheet.get("total_debt") else None
+        total_cash = (
+            balance_sheet.get("total_cash", [None])[-1]
+            if balance_sheet.get("total_cash")
+            else None
+        )
+        total_debt = (
+            balance_sheet.get("total_debt", [None])[-1]
+            if balance_sheet.get("total_debt")
+            else None
+        )
         if total_cash is not None and total_debt is not None:
             net_cash = total_cash - total_debt
-    
+
     # Get shares outstanding (prefer diluted for DCF)
     shares = None
     diluted_shares = None
@@ -212,19 +225,21 @@ def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
     if current_metrics:
         diluted_shares = current_metrics.get("diluted_shares_outstanding")
         shares = current_metrics.get("shares_outstanding")
-    
+
     # Generate guidance
     guidance = []
-    
+
     if options:
         # Determine recommended method based on data characteristics
-        fcf_values = [v for v in financial_data.get("free_cash_flow", []) if v is not None]
-        
+        fcf_values = [
+            v for v in financial_data.get("free_cash_flow", []) if v is not None
+        ]
+
         if len(fcf_values) >= 3:
             # Check volatility
             avg_fcf = sum(fcf_values) / len(fcf_values)
             max_deviation = max(abs(v - avg_fcf) / avg_fcf for v in fcf_values)
-            
+
             if max_deviation > 0.3:
                 guidance.append(
                     "FCF shows high volatility (>30% deviation from average). "
@@ -234,19 +249,23 @@ def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
                 guidance.append(
                     "FCF is relatively stable. 'most_recent' or 'average' methods are appropriate."
                 )
-        
-        if "sbc_adjusted" in options and options["sbc_adjusted"]["base_fcf"] < options["most_recent"]["base_fcf"] * 0.9:
+
+        if (
+            "sbc_adjusted" in options
+            and options["sbc_adjusted"]["base_fcf"]
+            < options["most_recent"]["base_fcf"] * 0.9
+        ):
             guidance.append(
                 "Stock-based compensation is significant (>10% of FCF). "
                 "Consider using 'sbc_adjusted' method for more conservative valuation."
             )
-        
+
         if cagr_result and cagr_result.get("cagr"):
             guidance.append(
                 f"Historical revenue CAGR: {cagr_result['cagr']:.1f}%. "
                 "Use this as a reference when selecting growth rates."
             )
-    
+
     result = {
         "session_id": session_id,
         "symbol": session.get("symbol", session_id),
@@ -255,13 +274,15 @@ def get_base_fcf_options(session_id: str) -> Dict[str, Any]:
         "net_cash": round(net_cash, 2),
         "shares_outstanding": shares,
         "diluted_shares_outstanding": diluted_shares or shares,
-        "available_fcf_years": len([v for v in financial_data.get("free_cash_flow", []) if v is not None]),
+        "available_fcf_years": len(
+            [v for v in financial_data.get("free_cash_flow", []) if v is not None]
+        ),
         "guidance": guidance,
     }
-    
+
     # Store in session for later use
     session_manager.update_session(session_id, {"base_fcf_options": result})
-    
+
     return result
 
 
@@ -277,15 +298,15 @@ def run_dcf_analysis(
     override_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run DCF analysis using data from session.
-    
+
     This is the primary DCF analysis tool. It pulls all required data from
     the session and performs calculations without the agent needing to pass
     data between tools.
-    
+
     Assumptions are validated against the per-company registry (hard reject
     on deviation unless override_reason is supplied). Call
     get_prior_assumptions first to read the registered methodology.
-    
+
     Args:
         session_id: Session identifier (typically ticker symbol)
         growth_rates: List of growth rates for each projection year
@@ -297,19 +318,42 @@ def run_dcf_analysis(
         shares_override: Override shares outstanding (optional)
         override_reason: Required to proceed when assumptions violate the
             registry guardrails; must cite the changed fundamental (optional)
-    
+
     Returns:
         Complete DCF analysis results with validation warnings
     """
     session = _get_session_or_error(session_id)
-    
+
     if not session.get("financial_data"):
         raise ValidationError(
             "No financial data in session. Call get_financial_data first."
         )
-    
+
     financial_data = session["financial_data"]
-    
+
+    # Balance-sheet financial companies: FCF DCF is structurally invalid
+    # (float distorts cash flow; policyholder reserves make debt
+    # operational). Hard-block unless the agent explicitly overrides.
+    # Asset-light provider-sector financials (payment networks) classify as
+    # operating and are NOT blocked.
+    classification = classify_valuation_track(
+        financial_data,
+        session.get("balance_sheet"),
+        session.get("current_metrics"),
+    )
+    session_manager.update_session(session_id, {"valuation_track": classification})
+    if classification["track"] == "financial" and not (
+        override_reason and override_reason.strip()
+    ):
+        raise ValidationError(
+            "FCF DCF is structurally invalid for financial companies "
+            f"({classification['sector']}): "
+            "float distorts operating cash flow and policyholder reserves "
+            "make debt operational. Use run_financials_valuation (residual "
+            "income on book value) instead. Pass override_reason citing a "
+            "changed fundamental to proceed with the DCF anyway."
+        )
+
     # Get historical CAGR for validation
     historical_cagr = None
     calculated_cagr = session.get("calculated_cagr")
@@ -322,7 +366,7 @@ def run_dcf_analysis(
             session_manager.update_session(session_id, {"calculated_cagr": cagr_result})
         except Exception:
             pass
-    
+
     # Get company revenue for validation
     revenue_data = financial_data.get("revenue", [])
     company_revenue = None
@@ -330,7 +374,7 @@ def run_dcf_analysis(
         valid_revenue = [r for r in revenue_data if r is not None]
         if valid_revenue:
             company_revenue = valid_revenue[-1]
-    
+
     # Validate assumptions
     validation_warnings = validate_assumptions(
         growth_rates=growth_rates,
@@ -343,8 +387,22 @@ def run_dcf_analysis(
     # Registry guardrails (hard reject unless override_reason supplied)
     canonical = normalize_ticker(session.get("symbol", session_id))
     registry_entry = _read_registry_row(canonical)
+    registry_method_note = None
+    dcf_registry = registry_entry
+    if registry_entry is not None and registry_entry.get("method") not in (
+        None,
+        "dcf",
+    ):
+        # Registry holds a non-DCF methodology (e.g., a legacy residual-
+        # income entry); treat as a first run for DCF guardrail purposes.
+        registry_method_note = (
+            f"Registry holds a '{registry_entry.get('method')}' methodology "
+            "for this ticker; first-run guardrails apply to this DCF "
+            "analysis."
+        )
+        dcf_registry = None
     wacc_baseline = None
-    if registry_entry is None:
+    if dcf_registry is None:
         try:
             from financialcalc.tools.wacc import calculate_wacc
 
@@ -358,20 +416,23 @@ def run_dcf_analysis(
         terminal_multiple,
         discount_rate,
         base_fcf_method=base_fcf_method,
-        registry=registry_entry,
+        registry=dcf_registry,
         wacc_baseline=wacc_baseline,
     )
     overridden = bool(violations and override_reason and override_reason.strip())
     registry_match = {
         "ticker": canonical,
-        "registered": registry_entry is not None,
+        "registered": dcf_registry is not None,
+        "method": "dcf",
+        "method_note": registry_method_note,
         "violations": violations,
         "overridden": overridden,
         "override_reason": override_reason if overridden else None,
     }
     if violations and not overridden:
         raise ValidationError(
-            "Assumption guardrails violated: " + "; ".join(violations)
+            "Assumption guardrails violated: "
+            + "; ".join(violations)
             + ". Re-run with assumptions matching the registry (see "
             "get_prior_assumptions), or pass override_reason citing the "
             "changed fundamental. After an accepted override, call "
@@ -381,7 +442,7 @@ def run_dcf_analysis(
     # Calculate base FCF
     base_fcf_result = calculate_base_fcf(financial_data, base_fcf_method)
     base_fcf = base_fcf_result["base_fcf"]
-    
+
     # Get net cash/debt
     if net_cash_override is not None:
         net_cash = net_cash_override
@@ -389,11 +450,19 @@ def run_dcf_analysis(
         net_cash = 0
         balance_sheet = session.get("balance_sheet")
         if balance_sheet:
-            total_cash = balance_sheet.get("total_cash", [None])[-1] if balance_sheet.get("total_cash") else None
-            total_debt = balance_sheet.get("total_debt", [None])[-1] if balance_sheet.get("total_debt") else None
+            total_cash = (
+                balance_sheet.get("total_cash", [None])[-1]
+                if balance_sheet.get("total_cash")
+                else None
+            )
+            total_debt = (
+                balance_sheet.get("total_debt", [None])[-1]
+                if balance_sheet.get("total_debt")
+                else None
+            )
             if total_cash is not None and total_debt is not None:
                 net_cash = total_cash - total_debt
-    
+
     # Get shares outstanding — prefer diluted (per IV_Distilled.md methodology)
     shares_basis = "override"
     if shares_override is not None:
@@ -430,21 +499,21 @@ def run_dcf_analysis(
     assert shares is not None
     # Run DCF calculations
     years = len(growth_rates)
-    
+
     # Project cash flows
     projection = project_cash_flows(base_fcf, growth_rates, years)
-    
+
     # Calculate present value of projected cash flows
     pv_flows = calculate_present_value(projection["projected_flows"], discount_rate)
-    
+
     # Calculate terminal value
     final_year_fcf = projection["projected_flows"][-1]
     tv_result = calculate_terminal_value(final_year_fcf, terminal_multiple)
-    
+
     # Discount terminal value
     r = discount_rate / 100
     tv_pv = tv_result["terminal_value"] / (1 + r) ** years
-    
+
     # Calculate intrinsic value
     iv_result = calculate_intrinsic_value(
         pv_flows["total_pv"],
@@ -452,11 +521,11 @@ def run_dcf_analysis(
         net_cash,
         shares,
     )
-    
+
     # Calculate buy price with margin of safety
     intrinsic_value = iv_result["intrinsic_value"]
     buy_price = intrinsic_value * (1 - margin_of_safety / 100)
-    
+
     # Calculate confidence score
     confidence = calculate_confidence_score(
         growth_rates=growth_rates,
@@ -465,15 +534,15 @@ def run_dcf_analysis(
         historical_cagr=historical_cagr,
         company_revenue=company_revenue,
     )
-    
+
     # Assess valuation
     current_price = None
     current_metrics = session.get("current_metrics")
     if current_metrics:
         current_price = current_metrics.get("current_price")
-    
+
     valuation = assess_valuation(current_price, intrinsic_value)
-    
+
     # Build results
     results = {
         "symbol": session.get("symbol", session_id),
@@ -501,6 +570,7 @@ def run_dcf_analysis(
         "valuation": valuation,
         "validation_warnings": validation_warnings,
         "registry_match": registry_match,
+        "valuation_track": classification,
         "wacc_baseline": wacc_baseline,
         "calculation_log": [
             f"Registry: {'matched' if registry_match['registered'] and not violations else 'n/a'}"
@@ -521,8 +591,8 @@ def run_dcf_analysis(
             f"Buy price ({margin_of_safety}% MoS): ${buy_price:.2f}",
         ],
     }
-    
+
     # Store in session
     session_manager.update_session(session_id, {"dcf_results": results})
-    
+
     return results

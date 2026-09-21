@@ -8,31 +8,48 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from financialcalc.tools.analysis_support import (
-    calculate_margin_of_safety, calculate_probability_weighted,
-    calculate_sensitivity_analysis, calculate_sotp_valuation,
-    normalize_base_value)
+    calculate_margin_of_safety,
+    calculate_probability_weighted,
+    calculate_sensitivity_analysis,
+    calculate_sotp_valuation,
+    normalize_base_value,
+)
 from financialcalc.tools.assumption_registry import (
     get_prior_assumptions,
     register_assumptions,
 )
 from financialcalc.tools.batch_operations import run_complete_dcf_analysis
-from financialcalc.tools.core_calculations import (calculate_cagr,
-                                                   calculate_custom_fcf,
-                                                   calculate_graham_formula,
-                                                   calculate_intrinsic_value,
-                                                   calculate_net_debt,
-                                                   calculate_present_value,
-                                                   calculate_terminal_value,
-                                                   project_cash_flows)
-from financialcalc.tools.data_retrieval import (get_balance_sheet,
-                                                get_current_metrics,
-                                                get_financial_data,
-                                                get_raw_financial_statements)
+from financialcalc.tools.core_calculations import (
+    calculate_cagr,
+    calculate_custom_fcf,
+    calculate_graham_formula,
+    calculate_intrinsic_value,
+    calculate_net_debt,
+    calculate_present_value,
+    calculate_terminal_value,
+    project_cash_flows,
+)
+from financialcalc.tools.data_retrieval import (
+    get_balance_sheet,
+    get_current_metrics,
+    get_dividend_history,
+    get_financial_data,
+    get_raw_financial_statements,
+    get_yearly_close_history,
+)
 from financialcalc.tools.eight_pillar import run_eight_pillar_analysis
-from financialcalc.tools.report_generation import (generate_analysis_report,
-                                                   generate_scenario_report)
-from financialcalc.tools.session_dcf import (get_base_fcf_options,
-                                             run_dcf_analysis)
+from financialcalc.tools.financials_pillars import run_financials_pillar_analysis
+from financialcalc.tools.financials_valuation import calculate_justified_pb
+from financialcalc.tools.report_generation import (
+    generate_analysis_report,
+    generate_financials_report,
+    generate_scenario_report,
+)
+from financialcalc.tools.session_dcf import get_base_fcf_options, run_dcf_analysis
+from financialcalc.tools.session_financials import (
+    get_financials_options,
+    run_financials_valuation,
+)
 from financialcalc.tools.wacc import calculate_wacc
 from financialcalc.utils.error_handling import FinancialCalcError
 
@@ -645,12 +662,14 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="get_prior_assumptions",
-        description="MUST CALL before run_dcf_analysis. Returns the registered "
-        "canonical methodology for a company (projection period, terminal "
-        "multiple, discount rate, base FCF method, growth schedule), the "
+        description="MUST CALL before run_dcf_analysis / "
+        "run_financials_valuation. Returns the registered canonical "
+        "methodology for a company (method, projection period, discount "
+        "rate, and DCF or residual-income fields as applicable), the "
         "smoothed intrinsic value from analysis history, and the moat-based "
-        "terminal-multiple rubric for first analyses. Re-analyses MUST reuse "
-        "the registered assumptions exactly.",
+        "rubric (terminal-multiple band for DCF, justified P/B band for "
+        "residual income) for first analyses. Re-analyses MUST reuse the "
+        "registered assumptions exactly.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -664,18 +683,26 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="register_assumptions",
-        description="Register or update the canonical DCF assumptions for a "
-        "company. Call after the FIRST successful DCF (to lock in methodology) "
-        "and after any accepted override (to record the change). Terminal "
-        "multiple must fall within the eight-pillar moat rubric band. Updates "
-        "require a substantive reason; all changes are logged with old/new "
-        "values.",
+        description="Register or update the canonical assumptions for a "
+        "company. Call after the FIRST successful valuation (to lock in "
+        "methodology) and after any accepted override (to record the "
+        "change). Two methods: 'dcf' (terminal multiple within the "
+        "eight-pillar moat rubric band) and 'residual_income' for "
+        "financial companies (implied justified P/B within the financials "
+        "rubric band). Updates require a substantive reason; all changes "
+        "are logged with old/new values.",
         inputSchema={
             "type": "object",
             "properties": {
                 "ticker": {
                     "type": "string",
                     "description": "Stock ticker symbol",
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["dcf", "residual_income"],
+                    "default": "dcf",
+                    "description": "Valuation methodology to register",
                 },
                 "projection_period": {
                     "type": "integer",
@@ -684,11 +711,13 @@ TOOLS: list[Tool] = [
                 },
                 "terminal_multiple": {
                     "type": "number",
-                    "description": "Terminal multiple (within moat rubric band)",
+                    "description": "REQUIRED for method=dcf. Terminal "
+                    "multiple (within moat rubric band)",
                 },
                 "discount_rate": {
                     "type": "number",
-                    "description": "Discount rate as percentage (near WACC baseline)",
+                    "description": "Discount rate / cost of equity as "
+                    "percentage (near WACC/CoE baseline)",
                 },
                 "base_fcf_method": {
                     "type": "string",
@@ -700,17 +729,37 @@ TOOLS: list[Tool] = [
                         "normalized",
                     ],
                     "default": "median",
-                    "description": "Base FCF calculation method",
+                    "description": "method=dcf only: base FCF method",
                 },
                 "growth_schedule": {
                     "type": "array",
                     "items": {"type": "number"},
-                    "description": "Per-year growth rates (percent) used in the DCF",
+                    "description": "method=dcf only: per-year growth rates "
+                    "(percent) used in the DCF",
+                },
+                "roe_schedule": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "method=residual_income only: per-year "
+                    "ROE (percent); length must equal projection_period",
+                },
+                "payout_ratio": {
+                    "type": "number",
+                    "description": "method=residual_income only: payout "
+                    "ratio (percent, 0-100)",
+                },
+                "terminal_growth": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "method=residual_income only: continuing "
+                    "residual-income growth (percent; >= 2pp below "
+                    "discount_rate)",
                 },
                 "moat_pct": {
                     "type": "number",
-                    "description": "Eight-pillar percentage at lock time "
-                    "(auto-read from session if omitted)",
+                    "description": "Pillar-analysis percentage at lock time "
+                    "(auto-read from session if omitted; financials variant "
+                    "used for residual_income)",
                 },
                 "reason": {
                     "type": "string",
@@ -721,9 +770,240 @@ TOOLS: list[Tool] = [
             "required": [
                 "ticker",
                 "projection_period",
-                "terminal_multiple",
                 "discount_rate",
             ],
+        },
+    ),
+    # --- Financial-Institution Valuation (Residual Income) ---
+    Tool(
+        name="calculate_justified_pb",
+        description="Calculate the justified price-to-book ratio: "
+        "P/B* = (ROE - g) / (cost of equity - g), and IV = BVPS x P/B* "
+        "when book value is supplied. Insurers earning ROE above their "
+        "cost of equity deserve P/B > 1; below it, < 1. Quick sanity "
+        "check for bank/insurer valuations.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "roe": {
+                    "type": "number",
+                    "description": "Sustainable ROE as percentage (e.g., 12)",
+                },
+                "cost_of_equity": {
+                    "type": "number",
+                    "description": "Cost of equity as percentage (e.g., 10)",
+                },
+                "growth": {
+                    "type": "number",
+                    "description": "Sustainable growth as percentage (must "
+                    "be below cost of equity)",
+                },
+                "book_value_per_share": {
+                    "type": "number",
+                    "description": "Current book value per share (optional; "
+                    "enables intrinsic_value output)",
+                },
+            },
+            "required": ["roe", "cost_of_equity", "growth"],
+        },
+    ),
+    Tool(
+        name="get_financials_options",
+        description="Get inputs and guidance for a residual-income valuation "
+        "of a financial company (bank/insurer). Returns historical ROE "
+        "(avg/latest/std), BVPS, payout ratios, P/B band, the CAPM "
+        "cost-of-equity anchor, current BVPS, and suggested conservative "
+        "assumptions. Call after get_financial_data, get_balance_sheet, and "
+        "get_current_metrics, BEFORE run_financials_valuation.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session identifier (ticker symbol)",
+                },
+            },
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="run_financials_valuation",
+        description="PRIMARY valuation tool for financial companies "
+        "(banks, insurers; FCF DCF is blocked for them). Residual-income "
+        "model: IV = book value per share + PV of earnings above the cost "
+        "of equity, with justified-P/B and DDM cross-checks computed from "
+        "the same assumptions. Assumptions are HARD-VALIDATED: cost of "
+        "equity anchored to the CAPM baseline, ROE schedule must fade "
+        "toward the cost of equity, terminal ROE <= CoE + 2pp, payout "
+        "0-100%, implied justified P/B within 0.5-2.5x on first run; "
+        "registered methodologies must be reused exactly (see "
+        "get_prior_assumptions). Deviations raise an error unless "
+        "override_reason cites the changed fundamental.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session identifier (ticker symbol)",
+                },
+                "roe_schedule": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "ROE assumption per projection year "
+                    "(percent); length sets the projection period (5 or 10); "
+                    "must fade toward the cost of equity",
+                },
+                "cost_of_equity": {
+                    "type": "number",
+                    "description": "Cost of equity as percentage; defaults "
+                    "to the CAPM baseline when omitted",
+                },
+                "payout_ratio": {
+                    "type": "number",
+                    "description": "Payout ratio (percent, 0-100); defaults "
+                    "to the historical average when omitted",
+                },
+                "terminal_growth": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "Continuing residual-income growth "
+                    "(percent; >= 2pp below cost of equity)",
+                },
+                "margin_of_safety": {
+                    "type": "number",
+                    "default": 30.0,
+                    "description": "Margin of safety percentage",
+                },
+                "override_reason": {
+                    "type": "string",
+                    "description": "Required ONLY when assumptions deviate "
+                    "from the registry/first-run guardrails; must cite the "
+                    "changed fundamental",
+                },
+            },
+            "required": ["session_id", "roe_schedule"],
+        },
+    ),
+    Tool(
+        name="run_financials_pillar_analysis",
+        description="8-pillar analysis variant for financial companies: "
+        "PE Ratio, ROE, BVPS Growth, Revenue Growth, Net Income Growth, "
+        "Shares Trend, Payout Sustainability, and P/B vs Justified P/B "
+        "(replaces the FCF/ROIC pillars that are meaningless for "
+        "banks/insurers). Output mirrors run_eight_pillar_analysis and "
+        "feeds the justified-P/B moat rubric used by the registry.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock ticker symbol",
+                },
+                "years": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Years of historical data (1-10)",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force fresh data fetch",
+                },
+                "clear_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Clear cache before fetching",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
+        name="generate_financials_report",
+        description="Generate a complete residual-income valuation report "
+        "from session data (executive summary with method and P/B context, "
+        "assumptions, per-year residual-income projection, justified-P/B "
+        "and DDM cross-checks, historical reference, sensitivity). Run "
+        "run_financials_valuation first.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session identifier (ticker symbol)",
+                },
+                "qualitative_assessment": {
+                    "type": "object",
+                    "description": "Optional qualitative factors "
+                    "(business_quality, moat_strength, management_quality, "
+                    "financial_health, notes)",
+                },
+            },
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="get_dividend_history",
+        description="Retrieve annual dividend-per-share history (USD, "
+        "oldest first). Used for payout-ratio analysis of financial "
+        "companies and dividend-growth checks. Empty lists mean the "
+        "company pays no dividends.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock ticker symbol",
+                },
+                "years": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "Years of dividend history (1-10)",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force fresh fetch",
+                },
+                "clear_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Clear dividend cache for this symbol",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
+        name="get_yearly_close_history",
+        description="Retrieve year-end closing prices (oldest first, "
+        "trading currency). Used with historical book value or EPS to "
+        "compute historical P/B and P/E bands. Monthly bars, last close "
+        "per calendar year.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock ticker symbol",
+                },
+                "years": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "Years of price history (1-10)",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force fresh fetch",
+                },
+                "clear_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Clear price-history cache for this symbol",
+                },
+            },
+            "required": ["symbol"],
         },
     ),
     # --- Session-Based Tools (Recommended) ---
@@ -746,7 +1026,9 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="run_dcf_analysis",
-        description="Run DCF analysis using data from session. RECOMMENDED over run_complete_dcf_analysis. "
+        description="Run DCF analysis using data from session. RECOMMENDED over run_complete_dcf_analysis "
+        "for OPERATING companies only - financial companies (banks/insurers) are hard-blocked and must use "
+        "run_financials_valuation instead. "
         "Pulls all data automatically from session - agent only needs to provide assumptions. "
         "Assumptions are HARD-VALIDATED against the company's registry entry: call "
         "get_prior_assumptions first and reuse the registered methodology. Deviations "
@@ -867,6 +1149,8 @@ TOOLS: list[Tool] = [
         "Shares Trend, Long-Term Liabilities, FCF Growth, and FCF Multiple. "
         "Returns pass/fail for each pillar with an overall score. "
         "Thresholds are configurable via .env. "
+        "For financial companies (banks/insurers) use "
+        "run_financials_pillar_analysis instead (equity-based pillars). "
         "Call get_financial_data first to populate session cache.",
         inputSchema={
             "type": "object",
@@ -920,6 +1204,14 @@ TOOL_FUNCTIONS = {
     # Assumption registry
     "get_prior_assumptions": get_prior_assumptions,
     "register_assumptions": register_assumptions,
+    # Financial-institution valuation (residual income)
+    "calculate_justified_pb": calculate_justified_pb,
+    "get_financials_options": get_financials_options,
+    "run_financials_valuation": run_financials_valuation,
+    "run_financials_pillar_analysis": run_financials_pillar_analysis,
+    "generate_financials_report": generate_financials_report,
+    "get_dividend_history": get_dividend_history,
+    "get_yearly_close_history": get_yearly_close_history,
     # Analysis support
     "calculate_margin_of_safety": calculate_margin_of_safety,
     "calculate_sensitivity_analysis": calculate_sensitivity_analysis,

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 import yfinance as yf
 
 from financialcalc.tools.data_retrieval import _get_cache, _get_yf_ticker, _safe_float
+from financialcalc.tools.financials_valuation import FINANCIAL_SECTORS
 from financialcalc.utils.cache_manager import CACHE_TTL_SECONDS
 from financialcalc.utils.config import settings
 
@@ -52,7 +53,6 @@ COUNTRY_RISK_PREMIUMS: Dict[str, float] = {
 }
 
 DEFAULT_COUNTRY_RISK = 1.5
-FINANCIAL_SECTORS = {"Financial Services"}
 
 
 def get_risk_free_rate() -> Optional[float]:

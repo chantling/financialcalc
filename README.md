@@ -232,6 +232,46 @@ Execute complete DCF analysis with user assumptions.
 - `terminal_value`: Calculated terminal value
 - Analysis breakdown of all calculations
 
+### Financial-Institution Valuation (Residual Income)
+
+FCF DCF is structurally invalid for banks and insurers (float distorts
+operating cash flow; policyholder reserves make debt operational).
+`run_dcf_analysis` and `run_complete_dcf_analysis` hard-block Financial
+Services companies unless `override_reason` is supplied. Use these tools
+instead:
+
+### 12. `calculate_justified_pb`
+Justified price-to-book: `P/B* = (ROE - g) / (cost of equity - g)`, with
+`IV = BVPS x P/B*` when book value is supplied.
+
+### 13. `get_financials_options`
+Historical ROE (avg/latest/std), BVPS, payout ratios, P/B band, CAPM
+cost-of-equity anchor, current BVPS, and suggested conservative
+assumptions. Call after `get_financial_data` + `get_balance_sheet` +
+`get_current_metrics`, before `run_financials_valuation`.
+
+### 14. `run_financials_valuation`
+Residual-income valuation: `IV = BVPS + PV(ROE - CoE) x BV` with
+justified-P/B and DDM cross-checks from the same assumptions. Hard
+guardrails: CoE anchored to CAPM baseline, ROE schedule must fade,
+terminal ROE <= CoE + 2pp, payout 0-100%, implied justified P/B 0.5-2.5x
+on first run; registered methodologies must be reused exactly.
+Deviations require `override_reason`.
+
+### 15. `run_financials_pillar_analysis`
+8-pillar variant for financial companies: PE, ROE, BVPS Growth, Revenue
+Growth, Net Income Growth, Shares Trend, Payout Sustainability, P/B vs
+Justified P/B. Feeds the justified-P/B moat rubric.
+
+### 16. `generate_financials_report`
+Full residual-income report: executive summary (method, current/justified
+P/B), assumptions, per-year projection table, cross-checks, historical
+reference, sensitivity.
+
+### 17. `get_dividend_history` / `get_yearly_close_history`
+Annual dividend-per-share (USD) and year-end close price histories for
+payout and multiple analysis.
+
 ## Caching
 
 The server uses SQLite caching to reduce Yahoo Finance API calls:

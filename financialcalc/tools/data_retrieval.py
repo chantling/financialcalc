@@ -1158,3 +1158,164 @@ def get_current_metrics(
         raise DataRetrievalError(
             f"Could not retrieve current metrics for {symbol}: {str(e)}"
         )
+
+
+def get_dividend_history(
+    symbol: str,
+    years: int = 10,
+    force_refresh: bool = False,
+    clear_cache: bool = False,
+) -> Dict:
+    """Retrieve annual dividend-per-share history.
+
+    Sums the per-share dividend payments reported by Yahoo Finance by
+    calendar year, returning the last `years` years with data (oldest
+    first). Values are converted to USD with the same exchange rate
+    convention as the financial statements (financialCurrency), so DPS
+    is directly comparable with the EPS series from get_financial_data.
+
+    Args:
+        symbol: Stock ticker symbol
+        years: Number of years of dividend history (1-10)
+        force_refresh: Force fetch from Yahoo Finance
+        clear_cache: Clear dividend cache for this symbol
+
+    Returns:
+        Dictionary with years_list, dividends_per_share (USD, oldest
+        first), total_dividend_years, and cached flag. Empty lists mean
+        the company pays no dividends (not an error).
+
+    Raises:
+        ValidationError: If symbol or years invalid
+        DataRetrievalError: If Yahoo Finance fails
+    """
+    if not symbol or not isinstance(symbol, str):
+        raise ValidationError("Symbol must be a non-empty string")
+    if years < 1 or years > 10:
+        raise ValidationError("Years must be between 1 and 10")
+
+    cache = _get_cache()
+    cache_key = f"dividends_v1_{years}"
+
+    if clear_cache:
+        cache.invalidate(symbol, cache_key)
+
+    if not force_refresh:
+        cached = cache.get(symbol, cache_key)
+        if cached and cached.get("dividends_per_share") is not None:
+            cached["cached"] = True
+            return cached
+
+    try:
+        ticker = _get_yf_ticker(symbol)
+        dividends = ticker.dividends
+
+        yearly: Dict[int, float] = {}
+        if dividends is not None and not dividends.empty:
+            for dt, amount in dividends.items():
+                value = _safe_float(amount)
+                if value is not None:
+                    yearly[int(dt.year)] = yearly.get(int(dt.year), 0.0) + value
+
+        sorted_years = sorted(yearly.keys())[-years:]
+        dps: List[Optional[float]] = [round(yearly[y], 4) for y in sorted_years]
+
+        financial_currency = ticker.info.get("financialCurrency")
+        exchange_rate = _get_exchange_rate_to_usd(financial_currency)
+        if exchange_rate is not None and exchange_rate != 1.0:
+            dps = _convert_array_to_usd(dps, exchange_rate)
+
+        result = {
+            "symbol": symbol,
+            "years_list": [str(y) for y in sorted_years],
+            "dividends_per_share": dps,
+            "total_dividend_years": len(dps),
+            "cached": False,
+        }
+        cache.set(symbol, cache_key, result, CACHE_TTL_SECONDS["dividends"])
+        return result
+    except DataRetrievalError:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch dividend history for {symbol}: {e}")
+        raise DataRetrievalError(
+            f"Could not retrieve dividend history for {symbol}: {str(e)}"
+        )
+
+
+def get_yearly_close_history(
+    symbol: str,
+    years: int = 10,
+    force_refresh: bool = False,
+    clear_cache: bool = False,
+) -> Dict:
+    """Retrieve year-end closing prices for historical multiple analysis.
+
+    Uses monthly bars and takes the last available close of each calendar
+    year, returning the last `years` years (oldest first). Prices are in
+    the trading currency of the listing and are NOT FX-converted; callers
+    should only build historical per-share multiples (P/B, P/E) when the
+    statements share the same currency.
+
+    Args:
+        symbol: Stock ticker symbol
+        years: Number of years of price history (1-10)
+        force_refresh: Force fetch from Yahoo Finance
+        clear_cache: Clear price-history cache for this symbol
+
+    Returns:
+        Dictionary with years_list, closes (oldest first), and cached flag
+
+    Raises:
+        ValidationError: If symbol or years invalid
+        DataRetrievalError: If Yahoo Finance fails or returns no data
+    """
+    if not symbol or not isinstance(symbol, str):
+        raise ValidationError("Symbol must be a non-empty string")
+    if years < 1 or years > 10:
+        raise ValidationError("Years must be between 1 and 10")
+
+    cache = _get_cache()
+    cache_key = f"price_history_v1_{years}"
+
+    if clear_cache:
+        cache.invalidate(symbol, cache_key)
+
+    if not force_refresh:
+        cached = cache.get(symbol, cache_key)
+        if cached and cached.get("closes") is not None:
+            cached["cached"] = True
+            return cached
+
+    try:
+        ticker = _get_yf_ticker(symbol)
+        hist = ticker.history(period=f"{years}y", interval="1mo")
+
+        yearly: Dict[int, float] = {}
+        if hist is not None and not hist.empty:
+            for dt, row in hist.iterrows():
+                close = _safe_float(row.get("Close"))
+                if close is not None:
+                    yearly[int(dt.year)] = close
+
+        if not yearly:
+            raise DataRetrievalError(f"No price history available for {symbol}")
+
+        sorted_years = sorted(yearly.keys())[-years:]
+        closes = [round(yearly[y], 2) for y in sorted_years]
+
+        result = {
+            "symbol": symbol,
+            "years_list": [str(y) for y in sorted_years],
+            "closes": closes,
+            "cached": False,
+        }
+        cache.set(symbol, cache_key, result, CACHE_TTL_SECONDS["price_history"])
+        return result
+    except DataRetrievalError:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch price history for {symbol}: {e}")
+        raise DataRetrievalError(
+            f"Could not retrieve price history for {symbol}: {str(e)}"
+        )

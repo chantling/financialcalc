@@ -25,6 +25,8 @@ CACHE_TTL_SECONDS = {
     "alpha_vantage_overview": 604800,
     "risk_free_rate": 86400,
     "wacc_inputs": 604800,
+    "dividends": 604800,
+    "price_history": 604800,
 }
 
 

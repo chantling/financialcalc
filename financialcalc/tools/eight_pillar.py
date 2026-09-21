@@ -15,6 +15,7 @@ from financialcalc.tools.data_retrieval import (
     _get_exchange_rate_to_usd,
     _get_yf_ticker,
 )
+from financialcalc.tools.financials_valuation import classify_valuation_track
 from financialcalc.utils.config import settings
 from financialcalc.utils.error_handling import ValidationError
 from financialcalc.utils.session_manager import session_manager
@@ -37,9 +38,11 @@ def _get_session_data(
         Dictionary with financial_data, balance_sheet, current_metrics,
         and gap_data (EBIT, tax expense, historical shares).
     """
-    from financialcalc.tools.data_retrieval import (get_balance_sheet,
-                                                    get_current_metrics,
-                                                    get_financial_data)
+    from financialcalc.tools.data_retrieval import (
+        get_balance_sheet,
+        get_current_metrics,
+        get_financial_data,
+    )
 
     session = session_manager.get_session(symbol) or {}
 
@@ -113,8 +116,7 @@ def _fetch_gap_data(symbol: str, years: int) -> Optional[Dict[str, Any]]:
         exchange_rate = _get_exchange_rate_to_usd(financial_currency)
 
         if exchange_rate is not None and exchange_rate != 1.0:
-            from financialcalc.tools.data_retrieval import \
-                _convert_array_to_usd
+            from financialcalc.tools.data_retrieval import _convert_array_to_usd
 
             ebit = _convert_array_to_usd(ebit, exchange_rate)
             tax_expense = _convert_array_to_usd(tax_expense, exchange_rate)
@@ -389,6 +391,25 @@ def run_eight_pillar_analysis(
             "gap_data_from_session": data.get("gap_data") is not None,
         },
     }
+
+    classification = classify_valuation_track(
+        financial_data, balance_sheet, current_metrics
+    )
+    result["valuation_track"] = classification
+    if classification["track"] == "financial":
+        result["financials_note"] = (
+            "This company is in a financial sector: the ROIC, LT-liabilities/"
+            "FCF, FCF growth, and FCF multiple pillars are structurally "
+            "meaningless here. Run run_financials_pillar_analysis for the "
+            "equity-based (ROE/BVPS/payout/P/B) variant."
+        )
+    elif classification["asset_light_override"]:
+        result["financials_note"] = (
+            "Provider sector is Financial Services, but the asset-light "
+            "override applies: this company is valued on the operating-"
+            "company track (these FCF pillars and run_dcf_analysis are "
+            "appropriate)."
+        )
 
     session_manager.update_session(symbol, {"eight_pillar_analysis": result})
 

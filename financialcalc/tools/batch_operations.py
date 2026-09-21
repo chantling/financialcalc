@@ -18,6 +18,7 @@ from financialcalc.tools.core_calculations import (
     calculate_terminal_value,
     project_cash_flows,
 )
+from financialcalc.tools.financials_valuation import classify_valuation_track
 from financialcalc.utils.error_handling import ValidationError
 from financialcalc.utils.validation import validate_against_registry
 
@@ -78,11 +79,38 @@ def run_complete_dcf_analysis(
     net_cash = assumptions.get("net_cash", 0)
     reason = override_reason or assumptions.get("override_reason")
 
+    # Balance-sheet financial companies: FCF DCF is structurally invalid.
+    # Hard-block unless the agent explicitly overrides. The batch path has
+    # no balance-sheet/metrics context, so the classifier falls back to
+    # the provider sector alone (conservative).
+    classification = classify_valuation_track(financial_data)
+    if classification["track"] == "financial" and not (reason and str(reason).strip()):
+        raise ValidationError(
+            "FCF DCF is structurally invalid for financial companies "
+            f"({classification['sector']}): "
+            "float distorts operating cash flow and policyholder reserves "
+            "make debt operational. Use run_financials_valuation (residual "
+            "income on book value) instead. Supply override_reason citing a "
+            "changed fundamental to proceed with the DCF anyway."
+        )
+
     # Registry guardrails (hard reject unless override_reason supplied)
     canonical = normalize_ticker(financial_data.get("symbol", ""))
     registry_entry = _read_registry_row(canonical) if canonical else None
+    registry_method_note = None
+    dcf_registry = registry_entry
+    if registry_entry is not None and registry_entry.get("method") not in (
+        None,
+        "dcf",
+    ):
+        registry_method_note = (
+            f"Registry holds a '{registry_entry.get('method')}' methodology "
+            "for this ticker; first-run guardrails apply to this DCF "
+            "analysis."
+        )
+        dcf_registry = None
     wacc_baseline = None
-    if registry_entry is None and canonical:
+    if dcf_registry is None and canonical:
         try:
             from financialcalc.tools.wacc import calculate_wacc
 
@@ -96,13 +124,15 @@ def run_complete_dcf_analysis(
         terminal_multiple,
         discount_rate,
         base_fcf_method=assumptions.get("base_fcf_method"),
-        registry=registry_entry,
+        registry=dcf_registry,
         wacc_baseline=wacc_baseline,
     )
     overridden = bool(violations and reason and str(reason).strip())
     registry_match = {
         "ticker": canonical,
-        "registered": registry_entry is not None,
+        "registered": dcf_registry is not None,
+        "method": "dcf",
+        "method_note": registry_method_note,
         "violations": violations,
         "overridden": overridden,
         "override_reason": reason if overridden else None,

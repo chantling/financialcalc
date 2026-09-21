@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 
 def _get_session_or_error(session_id: str) -> Dict[str, Any]:
     """Get session or raise error if not found.
-    
+
     Args:
         session_id: Session identifier
-        
+
     Returns:
         Session data dictionary
-        
+
     Raises:
         ValidationError: If session not found
     """
@@ -48,7 +48,7 @@ def generate_analysis_report(
     sensitivity_ranges: Optional[List[List[float]]] = None,
 ) -> Dict[str, Any]:
     """Generate a complete analysis report from session data.
-    
+
     The report includes:
     1. Executive summary with confidence score (at the top for quick review)
     2. Valuation assessment
@@ -56,7 +56,7 @@ def generate_analysis_report(
     4. Detailed calculation results
     5. Validation warnings
     6. Sensitivity analysis (optional)
-    
+
     Args:
         session_id: Session identifier (typically ticker symbol)
         qualitative_assessment: Optional dict with qualitative factors:
@@ -68,30 +68,28 @@ def generate_analysis_report(
         include_sensitivity: Whether to include sensitivity analysis
         sensitivity_variables: Variables to test (default: growth_rate, discount_rate)
         sensitivity_ranges: Value ranges for each variable
-    
+
     Returns:
         Complete analysis report with executive summary at the top
     """
     session = _get_session_or_error(session_id)
-    
+
     if not session.get("dcf_results"):
-        raise ValidationError(
-            "No DCF results in session. Run run_dcf_analysis first."
-        )
-    
+        raise ValidationError("No DCF results in session. Run run_dcf_analysis first.")
+
     dcf_results = session["dcf_results"]
     current_metrics = session.get("current_metrics") or {}
     financial_data = session.get("financial_data") or {}
-    
+
     # Get current price
     current_price = current_metrics.get("current_price")
-    
+
     # Get historical CAGR for confidence calculation
     historical_cagr = None
     calculated_cagr = session.get("calculated_cagr")
     if calculated_cagr:
         historical_cagr = calculated_cagr.get("cagr")
-    
+
     # Get company revenue for validation
     revenue_data = financial_data.get("revenue", [])
     company_revenue = None
@@ -99,7 +97,7 @@ def generate_analysis_report(
         valid_revenue = [r for r in revenue_data if r is not None]
         if valid_revenue:
             company_revenue = valid_revenue[-1]
-    
+
     # Calculate confidence score
     confidence = calculate_confidence_score(
         growth_rates=dcf_results.get("growth_rates", []),
@@ -108,11 +106,11 @@ def generate_analysis_report(
         historical_cagr=historical_cagr,
         company_revenue=company_revenue,
     )
-    
+
     # Assess valuation
     intrinsic_value = dcf_results.get("intrinsic_value")
     valuation_assessment = assess_valuation(current_price, intrinsic_value)
-    
+
     # Build executive summary (AT THE TOP for quick review)
     executive_summary = {
         "symbol": session.get("symbol", session_id),
@@ -129,7 +127,7 @@ def generate_analysis_report(
         "price_to_iv_ratio": valuation_assessment["price_to_iv_ratio"],
         "valuation_interpretation": valuation_assessment["interpretation"],
     }
-    
+
     # Build detailed sections
     report = {
         "executive_summary": executive_summary,  # FIRST for quick review
@@ -158,21 +156,23 @@ def generate_analysis_report(
         "validation_warnings": dcf_results.get("validation_warnings", []),
         "historical_reference": {
             "historical_cagr": historical_cagr,
-            "available_fcf_years": len([v for v in financial_data.get("free_cash_flow", []) if v is not None]),
+            "available_fcf_years": len(
+                [v for v in financial_data.get("free_cash_flow", []) if v is not None]
+            ),
             "available_revenue_years": len([v for v in revenue_data if v is not None]),
         },
     }
-    
+
     # Add sensitivity analysis if requested
     if include_sensitivity:
         from financialcalc.tools.analysis_support import calculate_sensitivity_analysis
-        
+
         # Use default ranges if not specified
         if sensitivity_variables is None:
             sensitivity_variables = ["growth_rate", "discount_rate"]
         if sensitivity_ranges is None:
             sensitivity_ranges = [[-3, 0, 3], [-2, 0, 2]]
-        
+
         try:
             sensitivity = calculate_sensitivity_analysis(
                 base_value=intrinsic_value,
@@ -191,7 +191,7 @@ def generate_analysis_report(
         except Exception as e:
             logger.warning(f"Sensitivity analysis failed: {e}")
             report["sensitivity_analysis"] = {"error": str(e)}
-    
+
     return report
 
 
@@ -201,7 +201,7 @@ def generate_scenario_report(
     qualitative_assessment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate a report with scenario analysis.
-    
+
     Args:
         session_id: Session identifier
         scenarios: List of scenario dicts, each with:
@@ -210,34 +210,34 @@ def generate_scenario_report(
             - terminal_multiple: Terminal multiple
             - probability: Probability weight (0-100)
         qualitative_assessment: Optional qualitative factors
-    
+
     Returns:
         Complete report with scenario analysis
     """
     session = _get_session_or_error(session_id)
-    
+
     if not session.get("dcf_results"):
         raise ValidationError("No DCF results in session. Run run_dcf_analysis first.")
-    
+
     dcf_results = session["dcf_results"]
     current_metrics = session.get("current_metrics") or {}
     financial_data = session.get("financial_data") or {}
-    
+
     current_price = current_metrics.get("current_price")
-    
+
     # Get historical data for confidence
     historical_cagr = None
     calculated_cagr = session.get("calculated_cagr")
     if calculated_cagr:
         historical_cagr = calculated_cagr.get("cagr")
-    
+
     revenue_data = financial_data.get("revenue", [])
     company_revenue = None
     if revenue_data:
         valid_revenue = [r for r in revenue_data if r is not None]
         if valid_revenue:
             company_revenue = valid_revenue[-1]
-    
+
     # Calculate confidence for base case
     base_confidence = calculate_confidence_score(
         growth_rates=dcf_results.get("growth_rates", []),
@@ -246,14 +246,14 @@ def generate_scenario_report(
         historical_cagr=historical_cagr,
         company_revenue=company_revenue,
     )
-    
+
     # Run scenario analysis
     from financialcalc.tools.analysis_support import calculate_probability_weighted
-    
+
     scenario_results = []
     scenario_values = []
     scenario_probabilities = []
-    
+
     for scenario in scenarios:
         # Run DCF for this scenario
         from financialcalc.tools.core_calculations import (
@@ -262,31 +262,37 @@ def generate_scenario_report(
             calculate_terminal_value,
             project_cash_flows,
         )
-        
+
         try:
             proj = project_cash_flows(
                 dcf_results["base_fcf"],
                 scenario["growth_rates"],
                 len(scenario["growth_rates"]),
             )
-            pv = calculate_present_value(proj["projected_flows"], dcf_results["discount_rate"])
-            tv = calculate_terminal_value(proj["projected_flows"][-1], scenario["terminal_multiple"])
-            
+            pv = calculate_present_value(
+                proj["projected_flows"], dcf_results["discount_rate"]
+            )
+            tv = calculate_terminal_value(
+                proj["projected_flows"][-1], scenario["terminal_multiple"]
+            )
+
             # Discount terminal value
             r = dcf_results["discount_rate"] / 100
             years = len(scenario["growth_rates"])
             tv_pv = tv["terminal_value"] / (1 + r) ** years
-            
+
             iv = calculate_intrinsic_value(
                 pv["total_pv"],
                 tv_pv,
                 dcf_results.get("net_cash", 0),
                 dcf_results["shares_outstanding"],
             )
-            
+
             scenario_iv = iv["intrinsic_value"]
-            scenario_buy_price = scenario_iv * (1 - dcf_results.get("margin_of_safety", 30) / 100)
-            
+            scenario_buy_price = scenario_iv * (
+                1 - dcf_results.get("margin_of_safety", 30) / 100
+            )
+
             # Calculate confidence for this scenario
             scenario_confidence = calculate_confidence_score(
                 growth_rates=scenario["growth_rates"],
@@ -295,42 +301,48 @@ def generate_scenario_report(
                 historical_cagr=historical_cagr,
                 company_revenue=company_revenue,
             )
-            
-            scenario_results.append({
-                "name": scenario["name"],
-                "assumptions": {
-                    "growth_rates": scenario["growth_rates"],
-                    "terminal_multiple": scenario["terminal_multiple"],
-                    "probability": scenario["probability"],
-                },
-                "intrinsic_value": round(scenario_iv, 2),
-                "buy_price": round(scenario_buy_price, 2),
-                "confidence_score": scenario_confidence["confidence_score"],
-                "confidence_level": scenario_confidence["confidence_level"],
-            })
-            
+
+            scenario_results.append(
+                {
+                    "name": scenario["name"],
+                    "assumptions": {
+                        "growth_rates": scenario["growth_rates"],
+                        "terminal_multiple": scenario["terminal_multiple"],
+                        "probability": scenario["probability"],
+                    },
+                    "intrinsic_value": round(scenario_iv, 2),
+                    "buy_price": round(scenario_buy_price, 2),
+                    "confidence_score": scenario_confidence["confidence_score"],
+                    "confidence_level": scenario_confidence["confidence_level"],
+                }
+            )
+
             scenario_values.append(scenario_iv)
             scenario_probabilities.append(scenario["probability"])
-            
+
         except Exception as e:
             logger.warning(f"Scenario '{scenario['name']}' failed: {e}")
-            scenario_results.append({
-                "name": scenario["name"],
-                "error": str(e),
-            })
-    
+            scenario_results.append(
+                {
+                    "name": scenario["name"],
+                    "error": str(e),
+                }
+            )
+
     # Calculate probability-weighted IV
     weighted_result = None
     if scenario_values and scenario_probabilities:
         try:
-            weighted_result = calculate_probability_weighted(scenario_values, scenario_probabilities)
+            weighted_result = calculate_probability_weighted(
+                scenario_values, scenario_probabilities
+            )
         except Exception as e:
             logger.warning(f"Probability weighting failed: {e}")
-    
+
     # Assess valuation using weighted IV
     weighted_iv = weighted_result["weighted_average"] if weighted_result else None
     valuation_assessment = assess_valuation(current_price, weighted_iv)
-    
+
     # Build executive summary
     executive_summary = {
         "symbol": session.get("symbol", session_id),
@@ -338,7 +350,11 @@ def generate_scenario_report(
         "current_price": current_price,
         "base_case_iv": dcf_results.get("intrinsic_value"),
         "weighted_iv": weighted_iv,
-        "weighted_buy_price": round(weighted_iv * (1 - dcf_results.get("margin_of_safety", 30) / 100), 2) if weighted_iv else None,
+        "weighted_buy_price": (
+            round(weighted_iv * (1 - dcf_results.get("margin_of_safety", 30) / 100), 2)
+            if weighted_iv
+            else None
+        ),
         "margin_of_safety": dcf_results.get("margin_of_safety"),
         "base_case_confidence_score": base_confidence["confidence_score"],
         "base_case_confidence_level": base_confidence["confidence_level"],
@@ -346,11 +362,27 @@ def generate_scenario_report(
         "price_to_iv_ratio": valuation_assessment["price_to_iv_ratio"],
         "valuation_interpretation": valuation_assessment["interpretation"],
         "scenario_range": {
-            "min": min(s["intrinsic_value"] for s in scenario_results if "intrinsic_value" in s) if scenario_results else None,
-            "max": max(s["intrinsic_value"] for s in scenario_results if "intrinsic_value" in s) if scenario_results else None,
+            "min": (
+                min(
+                    s["intrinsic_value"]
+                    for s in scenario_results
+                    if "intrinsic_value" in s
+                )
+                if scenario_results
+                else None
+            ),
+            "max": (
+                max(
+                    s["intrinsic_value"]
+                    for s in scenario_results
+                    if "intrinsic_value" in s
+                )
+                if scenario_results
+                else None
+            ),
         },
     }
-    
+
     report = {
         "executive_summary": executive_summary,
         "qualitative_assessment": qualitative_assessment or {},
@@ -370,5 +402,115 @@ def generate_scenario_report(
         },
         "validation_warnings": dcf_results.get("validation_warnings", []),
     }
-    
+
+    return report
+
+
+def generate_financials_report(
+    session_id: str,
+    qualitative_assessment: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Generate a complete residual-income valuation report from session.
+
+    Requires financials_results in the session (from
+    run_financials_valuation). The report includes:
+
+    1. Executive summary with method, P/B context, and confidence score
+    2. Assumptions used (BVPS, ROE schedule, payout, cost of equity)
+    3. Residual-income valuation details (per-year projection table)
+    4. Justified P/B and DDM cross-checks
+    5. Historical reference (ROE/payout/P/B band)
+    6. Validation warnings and sensitivity analysis
+
+    Args:
+        session_id: Session identifier (typically ticker symbol)
+        qualitative_assessment: Optional dict with qualitative factors
+            (business_quality, moat_strength, management_quality,
+            financial_health, notes)
+
+    Returns:
+        Complete financials valuation report with executive summary first
+
+    Raises:
+        ValidationError: If session or financials results are missing
+    """
+    session = _get_session_or_error(session_id)
+
+    if not session.get("financials_results"):
+        raise ValidationError(
+            "No financials results in session. Run run_financials_valuation " "first."
+        )
+
+    results = session["financials_results"]
+    current_metrics = session.get("current_metrics") or {}
+    current_price = current_metrics.get("current_price")
+    historical = session.get("financials_data") or {}
+
+    valuation = assess_valuation(current_price, results.get("intrinsic_value"))
+    confidence = results.get("confidence") or {}
+
+    executive_summary = {
+        "symbol": session.get("symbol", session_id),
+        "analysis_date": datetime.now().strftime("%Y-%m-%d"),
+        "method": "residual_income (financial company)",
+        "current_price": current_price,
+        "current_pb": results.get("current_pb"),
+        "justified_pb": (results.get("justified_pb_cross_check") or {}).get(
+            "justified_pb"
+        ),
+        "book_value_per_share": results.get("bvps"),
+        "intrinsic_value": results.get("intrinsic_value"),
+        "buy_price": results.get("buy_price"),
+        "margin_of_safety": results.get("margin_of_safety"),
+        "confidence_score": confidence.get("confidence_score"),
+        "confidence_level": confidence.get("confidence_level"),
+        "risk_factors": confidence.get("risk_factors", []),
+        "valuation_assessment": valuation["assessment"],
+        "price_to_iv_ratio": valuation["price_to_iv_ratio"],
+        "valuation_interpretation": valuation["interpretation"],
+    }
+
+    report = {
+        "executive_summary": executive_summary,
+        "qualitative_assessment": qualitative_assessment or {},
+        "assumptions": {
+            "bvps": results.get("bvps"),
+            "roe_schedule": results.get("roe_schedule"),
+            "cost_of_equity": results.get("cost_of_equity"),
+            "coe_baseline": results.get("coe_baseline"),
+            "payout_ratio": results.get("payout_ratio"),
+            "terminal_growth": results.get("terminal_growth"),
+            "projection_years": results.get("projection_years"),
+            "margin_of_safety": results.get("margin_of_safety"),
+            "shares_basis": results.get("shares_basis"),
+        },
+        "valuation_results": {
+            "projection_table": results.get("projection_table"),
+            "pv_residual_income_sum": results.get("pv_residual_income_sum"),
+            "terminal_value": results.get("terminal_value"),
+            "pv_terminal_value": results.get("pv_terminal_value"),
+            "terminal_bvps": results.get("terminal_bvps"),
+            "value_composition": results.get("value_composition"),
+            "intrinsic_value": results.get("intrinsic_value"),
+            "buy_price": results.get("buy_price"),
+        },
+        "cross_checks": {
+            "justified_pb": results.get("justified_pb_cross_check"),
+            "ddm": results.get("ddm_cross_check"),
+        },
+        "historical_reference": {
+            "average_roe": historical.get("average_roe"),
+            "latest_roe": historical.get("latest_roe"),
+            "roe_std": historical.get("roe_std"),
+            "average_payout": historical.get("average_payout"),
+            "pb_band": historical.get("pb_band"),
+            "equity_years": historical.get("equity_years"),
+            "dividend_years": historical.get("dividend_years"),
+        },
+        "validation_warnings": results.get("validation_warnings", []),
+        "registry_match": results.get("registry_match"),
+        "sensitivity_analysis": results.get("sensitivity_analysis"),
+        "calculation_log": results.get("calculation_log", []),
+    }
+
     return report

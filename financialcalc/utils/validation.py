@@ -7,6 +7,8 @@ reasonable ranges and calculate confidence scores for valuations.
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from financialcalc.utils.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -579,4 +581,359 @@ def assess_valuation(
         "assessment": assessment,
         "price_to_iv_ratio": round(ratio, 2),
         "interpretation": interpretation,
+    }
+
+
+def validate_financials_assumptions(
+    roe_schedule: List[float],
+    cost_of_equity: float,
+    payout_ratio: float,
+    terminal_growth: float = 0.0,
+    historical_roe: Optional[float] = None,
+    historical_payout: Optional[float] = None,
+) -> List[str]:
+    """Validate residual-income assumptions and return soft warnings.
+
+    Args:
+        roe_schedule: ROE assumption per projection year (percent)
+        cost_of_equity: Cost of equity (percent)
+        payout_ratio: Dividend payout ratio (percent)
+        terminal_growth: Continuing residual-income growth (percent)
+        historical_roe: Average historical ROE for comparison
+        historical_payout: Average historical payout for comparison
+
+    Returns:
+        List of warning messages (empty if assumptions look reasonable)
+    """
+    warnings: List[str] = []
+
+    if not roe_schedule:
+        return warnings
+
+    if roe_schedule[0] > 25:
+        warnings.append(
+            f"Warning: Year 1 ROE ({roe_schedule[0]}%) is above 25%. "
+            "Sustained ROE above 25% is rare even for excellent insurers."
+        )
+
+    if historical_roe is not None and historical_roe > 0:
+        avg_roe = sum(roe_schedule) / len(roe_schedule)
+        deviation = (avg_roe / historical_roe - 1) * 100
+        if deviation > 30:
+            warnings.append(
+                f"Warning: Average projected ROE ({avg_roe:.1f}%) is "
+                f"{deviation:.0f}% above historical average "
+                f"({historical_roe:.1f}%). Consider a more conservative fade."
+            )
+        elif deviation < -30:
+            warnings.append(
+                f"Note: Average projected ROE ({avg_roe:.1f}%) is "
+                f"{abs(deviation):.0f}% below historical average "
+                f"({historical_roe:.1f}%). This is conservative but verify "
+                "a structural reason exists."
+            )
+
+    if payout_ratio > 80:
+        warnings.append(
+            f"Warning: Payout ratio ({payout_ratio}%) exceeds 80%. "
+            "High payouts limit book growth and can be cut in downturns."
+        )
+    elif payout_ratio < 10:
+        warnings.append(
+            f"Note: Payout ratio ({payout_ratio}%) is below 10%. Financial "
+            "companies retaining nearly all earnings is unusual; verify "
+            "capital-deployment plans."
+        )
+
+    if historical_payout is not None and abs(payout_ratio - historical_payout) > 20:
+        warnings.append(
+            f"Note: Payout ratio ({payout_ratio}%) deviates more than 20pp "
+            f"from historical average ({historical_payout:.1f}%). Cite a "
+            "capital-allocation change if intentional."
+        )
+
+    if cost_of_equity < 6 or cost_of_equity > 15:
+        warnings.append(
+            f"Warning: Cost of equity ({cost_of_equity}%) outside standard "
+            "range (6-15%)."
+        )
+
+    if terminal_growth > 0:
+        warnings.append(
+            f"Note: Positive terminal growth ({terminal_growth}%) assumes "
+            "excess returns compound into perpetuity. Ensure terminal ROE "
+            "genuinely exceeds the cost of equity."
+        )
+
+    return warnings
+
+
+def validate_financials_against_registry(
+    roe_schedule: List[float],
+    cost_of_equity: float,
+    payout_ratio: float,
+    terminal_growth: float,
+    registry: Optional[Dict[str, Any]] = None,
+    coe_baseline: Optional[float] = None,
+) -> List[str]:
+    """Validate RI assumptions against the registry / absolute guardrails.
+
+    Hard-reject rules (callers raise ValidationError on any violation
+    unless the agent supplies an override_reason):
+
+    With a residual_income registry entry (update runs):
+        - cost of equity within +/-1pp of registered value
+        - payout ratio within +/-5pp of registered value
+        - projection period equals registered period
+        - each ROE year within +/-3pp of the registered schedule
+        - terminal growth within +/-0.5pp of registered value
+
+    Without a registry entry (first run):
+        - cost of equity within +/-2pp of the CAPM baseline when
+          available, otherwise inside the 8-12% default band
+        - ROE schedule fades (no year-over-year increase > 1pp)
+        - terminal ROE <= cost of equity + 2pp
+        - payout ratio between 0 and 100
+        - terminal growth <= cost of equity - 2pp
+        - implied justified P/B (terminal values) inside 0.5-2.5x
+
+    Args:
+        roe_schedule: Proposed per-year ROE (percent)
+        cost_of_equity: Proposed cost of equity (percent)
+        payout_ratio: Proposed payout ratio (percent)
+        terminal_growth: Proposed continuing RI growth (percent)
+        registry: residual_income registry entry dict, or None
+        coe_baseline: Calculated CAPM cost of equity (percent) or None
+
+    Returns:
+        List of violation messages (empty = assumptions accepted)
+    """
+    violations: List[str] = []
+
+    if registry is not None:
+        reg_coe = registry.get("discount_rate")
+        if reg_coe is not None and abs(cost_of_equity - reg_coe) > 1.0:
+            violations.append(
+                f"cost_of_equity {cost_of_equity}% deviates more than +/-1pp "
+                f"from registered {reg_coe}%"
+            )
+
+        reg_payout = registry.get("payout_ratio")
+        if reg_payout is not None and abs(payout_ratio - reg_payout) > 5.0:
+            violations.append(
+                f"payout_ratio {payout_ratio}% deviates more than +/-5pp from "
+                f"registered {reg_payout}%"
+            )
+
+        reg_period = registry.get("projection_period")
+        if reg_period is not None and len(roe_schedule) != reg_period:
+            violations.append(
+                f"projection period {len(roe_schedule)} years does not match "
+                f"registered {reg_period} years"
+            )
+
+        reg_schedule = registry.get("roe_schedule")
+        if reg_schedule and roe_schedule and reg_period is not None:
+            if len(reg_schedule) == reg_period:
+                if len(reg_schedule) != len(roe_schedule):
+                    violations.append(
+                        f"ROE schedule length {len(roe_schedule)} does not "
+                        f"match registered length {len(reg_schedule)}"
+                    )
+                else:
+                    for i, (proposed, registered) in enumerate(
+                        zip(roe_schedule, reg_schedule)
+                    ):
+                        if abs(proposed - registered) > 3.0:
+                            violations.append(
+                                f"ROE year {i + 1} ({proposed}%) deviates more "
+                                f"than +/-3pp from registered {registered}%"
+                            )
+                            break
+
+        reg_growth = registry.get("terminal_growth")
+        if reg_growth is not None and abs(terminal_growth - reg_growth) > 0.5:
+            violations.append(
+                f"terminal_growth {terminal_growth}% deviates more than "
+                f"+/-0.5pp from registered {reg_growth}%"
+            )
+
+        return violations
+
+    # First run (no registry): absolute guardrails.
+    if coe_baseline is not None:
+        if abs(cost_of_equity - coe_baseline) > 2.0:
+            violations.append(
+                f"cost_of_equity {cost_of_equity}% deviates more than +/-2pp "
+                f"from CAPM baseline {coe_baseline}%"
+            )
+    elif not (
+        settings.financials_coe_min <= cost_of_equity <= settings.financials_coe_max
+    ):
+        violations.append(
+            f"cost_of_equity {cost_of_equity}% outside "
+            f"{settings.financials_coe_min}-{settings.financials_coe_max}% "
+            "default band (no CAPM baseline available)"
+        )
+
+    if not (0 <= payout_ratio <= 100):
+        violations.append(f"payout_ratio {payout_ratio}% outside 0-100% range")
+
+    if terminal_growth > cost_of_equity - 2.0:
+        violations.append(
+            f"terminal_growth {terminal_growth}% must be at least 2pp below "
+            f"cost of equity ({cost_of_equity}%)"
+        )
+
+    if roe_schedule:
+        terminal_roe = roe_schedule[-1]
+        if terminal_roe > cost_of_equity + 2.0:
+            violations.append(
+                f"terminal ROE {terminal_roe}% exceeds cost of equity "
+                f"({cost_of_equity}%) by more than 2pp; fade ROE toward the "
+                "cost of equity"
+            )
+        for i in range(1, len(roe_schedule)):
+            jump = roe_schedule[i] - roe_schedule[i - 1]
+            if jump > 1.0:
+                violations.append(
+                    f"ROE schedule increases {jump:.1f}pp from year {i} to "
+                    f"year {i + 1} (schedules must fade, not accelerate)"
+                )
+                break
+
+        if terminal_growth < cost_of_equity:
+            denom = cost_of_equity - terminal_growth
+            implied_pb = (terminal_roe - terminal_growth) / denom
+            if implied_pb <= 0:
+                violations.append(
+                    f"terminal ROE {terminal_roe}% below terminal growth "
+                    f"{terminal_growth}% implies a negative justified P/B"
+                )
+            elif not (
+                settings.financials_justified_pb_min
+                <= implied_pb
+                <= settings.financials_justified_pb_max
+            ):
+                violations.append(
+                    f"implied justified P/B {implied_pb:.2f}x outside "
+                    f"{settings.financials_justified_pb_min}-"
+                    f"{settings.financials_justified_pb_max}x band for a "
+                    "first analysis"
+                )
+
+    return violations
+
+
+def calculate_financials_confidence_score(
+    roe_schedule: List[float],
+    cost_of_equity: float,
+    payout_ratio: float,
+    historical_roe: Optional[float] = None,
+    historical_roe_std: Optional[float] = None,
+    coe_baseline: Optional[float] = None,
+    equity_years: Optional[int] = None,
+    dividend_years: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Calculate a confidence score for a residual-income valuation.
+
+    Higher score = assumptions closer to historical performance = more
+    reliable. Deductions: ROE volatility, schedule-vs-history deviation,
+    payout sustainability, cost-of-equity anchoring, and data depth.
+
+    Args:
+        roe_schedule: ROE assumptions used in the model (percent)
+        cost_of_equity: Cost of equity used (percent)
+        payout_ratio: Payout ratio used (percent)
+        historical_roe: Average historical ROE (percent)
+        historical_roe_std: Standard deviation of historical ROE (pp)
+        coe_baseline: CAPM cost of equity for anchoring (percent)
+        equity_years: Years of equity history available
+        dividend_years: Years of dividend history available
+
+    Returns:
+        Dictionary with confidence_score (0-100), confidence_level,
+        risk_factors, and interpretation
+    """
+    score = 100
+    risk_factors: List[str] = []
+
+    if historical_roe_std is not None and roe_schedule:
+        if historical_roe_std > 5:
+            score -= 15
+            risk_factors.append(
+                f"Historical ROE is volatile (std {historical_roe_std:.1f}pp); "
+                "point estimates of future ROE are unreliable"
+            )
+        elif historical_roe_std > 3:
+            score -= 8
+            risk_factors.append(
+                f"Historical ROE moderately volatile (std {historical_roe_std:.1f}pp)"
+            )
+
+    if historical_roe is not None and historical_roe > 0 and roe_schedule:
+        avg_roe = sum(roe_schedule) / len(roe_schedule)
+        deviation = abs(avg_roe - historical_roe) / historical_roe
+        if deviation > 0.5:
+            score -= 15
+            risk_factors.append(
+                f"Projected ROE ({avg_roe:.1f}%) deviates {deviation*100:.0f}% "
+                f"from historical ({historical_roe:.1f}%)"
+            )
+        elif deviation > 0.3:
+            score -= 8
+            risk_factors.append(
+                f"Projected ROE ({avg_roe:.1f}%) deviates {deviation*100:.0f}% "
+                f"from historical ({historical_roe:.1f}%)"
+            )
+
+    if payout_ratio > 95:
+        score -= 15
+        risk_factors.append(
+            f"Payout ratio ({payout_ratio}%) leaves nearly no book growth buffer"
+        )
+    elif payout_ratio > 80:
+        score -= 10
+        risk_factors.append(
+            f"Payout ratio ({payout_ratio}%) is high; dividend cuts would "
+            "compress the valuation"
+        )
+
+    if coe_baseline is not None and abs(cost_of_equity - coe_baseline) > 1.0:
+        score -= 5
+        risk_factors.append(
+            f"Cost of equity ({cost_of_equity}%) deviates more than 1pp from "
+            f"CAPM baseline ({coe_baseline}%)"
+        )
+
+    if equity_years is not None and equity_years < 5:
+        score -= 10
+        risk_factors.append(f"Only {equity_years} years of equity history available")
+
+    if dividend_years is not None and dividend_years < 5:
+        score -= 5
+        risk_factors.append(
+            f"Only {dividend_years} years of dividend history available"
+        )
+
+    score = max(0, score)
+
+    if score >= 80:
+        confidence_level = "HIGH"
+    elif score >= 60:
+        confidence_level = "MEDIUM"
+    elif score >= 40:
+        confidence_level = "LOW"
+    else:
+        confidence_level = "VERY LOW"
+
+    return {
+        "confidence_score": score,
+        "confidence_level": confidence_level,
+        "risk_factors": risk_factors,
+        "interpretation": (
+            f"Confidence score {score}/100 ({confidence_level}) based on ROE "
+            "stability, schedule-vs-history deviation, payout sustainability, "
+            "cost-of-equity anchoring, and data depth."
+        ),
     }
